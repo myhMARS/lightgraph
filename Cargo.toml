@@ -1,0 +1,60 @@
+[package]
+name = "lightgraph"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance distributed graph database with CJK full-text, HNSW vector, and predicate pushdown"
+license = "MIT"
+
+[lib]
+name = "lightgraph"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Concurrency
+dashmap = "6"
+parking_lot = "0.12"
+crossbeam = "0.8"
+
+# Bitmap / indexes
+roaring = "0.10"
+fst = "0.4"
+ordered-float = "4"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+flatbuffers = "24"
+bincode = "1"
+
+# PyO3
+pyo3 = { version = "0.22", features = ["extension-module"] }
+
+# SIMD
+wide = "0.7"
+
+# Raft / distributed
+raft = "0.7"
+tonic = "0.12"
+prost = "0.13"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = "0.8"
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[[bench]]
+name = "bench_storage"
+harness = false
+
+[[bench]]
+name = "bench_hybrid"
+harness = false
+
+[[bench]]
+name = "bench_index"
+harness = false

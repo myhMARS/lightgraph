@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.5"]
+build-backend = "maturin"
+
+[project]
+name = "lightgraph"
+version = "0.1.0"
+description = "High-performance distributed graph database with CJK full-text, HNSW vector, and predicate pushdown"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "myhMARS" }]
+keywords = ["graph-database", "full-text-search", "vector-search", "hnsw", "cjk"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-benchmark", "numpy"]
+
+[tool.maturin]
+features = ["python"]
+python-source = "python"
+module-name = "lightgraph._core"
