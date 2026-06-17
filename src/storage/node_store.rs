@@ -148,6 +148,19 @@ impl NodeStore {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Allocate an ID without inserting (for transaction buffering).
+    pub fn alloc_id_direct(&self) -> NodeId {
+        self.alloc_id()
+    }
+
+    /// Insert with a pre-allocated ID (called by Transaction::commit).
+    pub fn insert_with_id(&self, id: NodeId, labels: Vec<LabelId>, props_row: u32, tx_id: TxId) {
+        let node = Node::new(id, labels, props_row, tx_id);
+        self.nodes.insert(id, node.clone());
+        self.total_ever.fetch_add(1, Ordering::Relaxed);
+        self.wal_insert(id, &node);
+    }
+
     // ── CRUD ──────────────────────────────────────────────────────
 
     pub fn insert_node(&self, labels: Vec<LabelId>, props_row: u32, tx_id: TxId) -> NodeId {

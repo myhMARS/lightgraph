@@ -112,6 +112,19 @@ impl EdgeStore {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Allocate an ID without inserting (for transaction buffering).
+    pub fn alloc_id_direct(&self) -> EdgeId {
+        self.alloc_id()
+    }
+
+    /// Insert with a pre-allocated ID (called by Transaction::commit).
+    pub fn insert_with_id(&self, id: EdgeId, src: NodeId, dst: NodeId, etype: TypeId,
+                          props_row: u32, tx_id: crate::types::TxId) {
+        let edge = Edge::new(id, src, dst, etype, props_row, tx_id);
+        self.edges.insert(id, edge.clone());
+        self.wal_insert(id, &edge);
+    }
+
     // ── CRUD ──────────────────────────────────────────────────────
 
     pub fn insert_edge(&self, src: NodeId, dst: NodeId, etype: TypeId,
