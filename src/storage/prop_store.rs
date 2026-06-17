@@ -13,6 +13,7 @@ use std::time::Duration;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 
+use super::consistency::Consistency;
 use super::wal_thread::WalThread;
 use crate::types::LabelId;
 
@@ -83,8 +84,8 @@ impl PropStore {
         Self { columns: DashMap::new(), schemas: DashMap::new(), wal: None }
     }
 
-    /// Open with WAL thread.
-    pub fn open(data_dir: &Path) -> io::Result<Self> {
+    /// Open with an explicit consistency contract.
+    pub fn open(data_dir: &Path, consistency: Consistency) -> io::Result<Self> {
         std::fs::create_dir_all(data_dir)?;
         let wal_path = data_dir.join("props.wal");
 
@@ -109,7 +110,7 @@ impl PropStore {
         }
 
         store.wal = Some(WalThread::spawn(
-            &data_dir.join("props.wal"), 65536, Duration::from_millis(5), 4096)?);
+            &data_dir.join("props.wal"), consistency.durability, consistency.wal_channel_capacity)?);
         Ok(store)
     }
 
@@ -212,13 +213,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let p = dir.path();
         {
-            let st = PropStore::open(p).unwrap();
+            let st = PropStore::open(p, Consistency::immediate()).unwrap();
             st.insert_row(0, &[("name".into(), s("Alice")), ("age".into(), v(30))]);
             st.insert_row(0, &[("name".into(), s("Bob"))]);
             st.flush();
         }
         {
-            let st = PropStore::open(p).unwrap();
+            let st = PropStore::open(p, Consistency::immediate()).unwrap();
             assert_eq!(st.row_count(0), 2);
             assert_eq!(st.get_prop(0, "name", 0), Some(s("Alice")));
             assert_eq!(st.get_prop(0, "age", 0), Some(v(30)));

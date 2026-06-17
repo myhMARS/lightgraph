@@ -11,6 +11,7 @@ use std::time::Duration;
 use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
 
+use super::consistency::Consistency;
 use super::wal_thread::WalThread;
 use super::Edge;
 use crate::types::{EdgeId, NodeId, TypeId, NULL_EDGE};
@@ -44,8 +45,8 @@ impl EdgeStore {
         }
     }
 
-    /// Open with WAL thread.
-    pub fn open(data_dir: &Path) -> io::Result<Self> {
+    /// Open with an explicit consistency contract.
+    pub fn open(data_dir: &Path, consistency: Consistency) -> io::Result<Self> {
         std::fs::create_dir_all(data_dir)?;
         let wal_path = data_dir.join("edges.wal");
 
@@ -80,7 +81,7 @@ impl EdgeStore {
         }
 
         store.wal = Some(WalThread::spawn(
-            &data_dir.join("edges.wal"), 65536, Duration::from_millis(5), 4096)?);
+            &data_dir.join("edges.wal"), consistency.durability, consistency.wal_channel_capacity)?);
         Ok(store)
     }
 
@@ -280,14 +281,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let p = dir.path();
         {
-            let s = EdgeStore::open(p).unwrap();
+            let s = EdgeStore::open(p, Consistency::immediate()).unwrap();
             s.insert_edge(0, 1, 10, 100, 1);
             s.insert_edge(1, 2, 20, 101, 1);
             s.soft_delete(0, 50);
             s.flush();
         }
         {
-            let s = EdgeStore::open(p).unwrap();
+            let s = EdgeStore::open(p, Consistency::immediate()).unwrap();
             assert_eq!(s.len(), 2);
             assert!(!s.get(0).unwrap().is_alive(50));
             assert_eq!(s.get(1).unwrap().etype, 20);

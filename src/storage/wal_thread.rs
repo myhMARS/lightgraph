@@ -21,13 +21,15 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{Sender, Receiver, bounded};
+
+use super::consistency::Durability;
 
 /// A command sent to the WAL thread.
 pub enum WalCmd {
@@ -52,16 +54,14 @@ pub struct WalThread {
 }
 
 impl WalThread {
-    /// Spawn the WAL thread.
+    /// Spawn the WAL thread with an explicit durability contract.
     ///
-    /// - `log_path`: path to the WAL file (e.g. `data/nodes.wal`)
-    /// - `batch_size`: fsync every N bytes (default 64KB)
-    /// - `batch_timeout`: fsync if nothing received for this long (default 5ms)
-    /// - `channel_cap`: capacity of the crossbeam channel (default 4096)
+    /// - `log_path`: path to the WAL file.
+    /// - `durability`: the consistency contract — defines fsync behavior.
+    /// - `channel_cap`: channel buffer size.
     pub fn spawn(
         log_path: &Path,
-        batch_size: usize,
-        batch_timeout: Duration,
+        durability: Durability,
         channel_cap: usize,
     ) -> io::Result<Self> {
         if let Some(parent) = log_path.parent() {
@@ -74,7 +74,7 @@ impl WalThread {
             .create(true)
             .append(true)
             .open(&log_path)?;
-        let mut writer = BufWriter::with_capacity(batch_size * 2, file);
+        let mut writer = BufWriter::with_capacity(durability.batch_bytes() * 2, file);
 
         if !exists {
             writer.write_all(MAGIC)?;
@@ -88,8 +88,12 @@ impl WalThread {
         let pending_clone = Arc::clone(&pending);
         let running_clone = Arc::clone(&running);
 
+        let batch_timeout = durability.batch_timeout();
+        let batch_bytes = durability.batch_bytes();
+        let fsync_enabled = durability.fsync_enabled();
+
         let handle = thread::spawn(move || {
-            wal_loop(rx, &mut writer, batch_size, batch_timeout, &pending_clone, &running_clone);
+            wal_loop(rx, &mut writer, batch_bytes, batch_timeout, fsync_enabled, &pending_clone, &running_clone);
         });
 
         Ok(Self {
@@ -152,6 +156,7 @@ fn wal_loop(
     writer: &mut BufWriter<File>,
     batch_size: usize,
     batch_timeout: Duration,
+    fsync_enabled: bool,
     pending: &AtomicU64,
     running: &AtomicBool,
 ) {
@@ -171,13 +176,13 @@ fn wal_loop(
                     }
                     WalCmd::Flush(reply) => {
                         // Drain any other pending commands, then sync
-                        flush_and_sync(writer, &mut buffer, pending);
+                        flush_and_sync(writer, &mut buffer, pending, fsync_enabled);
                         last_sync = Instant::now();
                         let _ = reply.send(());
                         continue;
                     }
                     WalCmd::Shutdown(reply) => {
-                        flush_and_sync(writer, &mut buffer, pending);
+                        flush_and_sync(writer, &mut buffer, pending, fsync_enabled);
                         let _ = reply.send(());
                         return;
                     }
@@ -196,7 +201,7 @@ fn wal_loop(
         let timed_out = last_sync.elapsed() >= batch_timeout;
 
         if (buffer_full || timed_out) && !buffer.is_empty() {
-            flush_and_sync(writer, &mut buffer, pending);
+            flush_and_sync(writer, &mut buffer, pending, fsync_enabled);
             last_sync = Instant::now();
         }
     }
@@ -218,7 +223,7 @@ fn encode_delete(buf: &mut Vec<u8>, id: u64) {
     buf.extend_from_slice(&id.to_le_bytes());
 }
 
-fn flush_and_sync(writer: &mut BufWriter<File>, buffer: &mut Vec<u8>, pending: &AtomicU64) {
+fn flush_and_sync(writer: &mut BufWriter<File>, buffer: &mut Vec<u8>, pending: &AtomicU64, fsync: bool) {
     if buffer.is_empty() {
         return;
     }
@@ -228,8 +233,10 @@ fn flush_and_sync(writer: &mut BufWriter<File>, buffer: &mut Vec<u8>, pending: &
     if let Err(e) = writer.flush() {
         eprintln!("WAL flush error: {}", e);
     }
-    if let Err(e) = writer.get_mut().sync_all() {
-        eprintln!("WAL fsync error: {}", e);
+    if fsync {
+        if let Err(e) = writer.get_mut().sync_all() {
+            eprintln!("WAL fsync error: {}", e);
+        }
     }
     pending.store(0, Ordering::Relaxed);
     buffer.clear();

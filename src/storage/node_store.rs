@@ -26,6 +26,7 @@ use std::time::Duration;
 use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
 
+use super::consistency::Consistency;
 use super::wal_thread::WalThread;
 use super::Node;
 use crate::types::{NodeId, LabelId, TxId};
@@ -64,8 +65,14 @@ impl NodeStore {
         }
     }
 
-    /// Open with dedicated WAL thread.
-    pub fn open(data_dir: &Path) -> io::Result<Self> {
+    /// Open with an explicit consistency contract.
+    ///
+    /// ```ignore
+    /// use lightgraph::storage::consistency::Consistency;
+    /// let store = NodeStore::open(path, Consistency::balanced())?;
+    /// let store = NodeStore::open(path, Consistency::immediate())?;
+    /// ```
+    pub fn open(data_dir: &Path, consistency: Consistency) -> io::Result<Self> {
         std::fs::create_dir_all(data_dir)?;
         let wal_path = data_dir.join("nodes.wal");
 
@@ -104,12 +111,11 @@ impl NodeStore {
             store.next_id.store(max_id + 1, Ordering::SeqCst);
         }
 
-        // Spawn WAL thread → data_dir/nodes.wal
+        // Spawn WAL thread with the chosen durability contract
         store.wal = Some(WalThread::spawn(
             &data_dir.join("nodes.wal"),
-            65536,
-            Duration::from_millis(5),
-            4096,
+            consistency.durability,
+            consistency.wal_channel_capacity,
         )?);
 
         Ok(store)
@@ -307,7 +313,7 @@ mod tests {
         let path = dir.path();
 
         {
-            let store = NodeStore::open(path).unwrap();
+            let store = NodeStore::open(path, Consistency::immediate()).unwrap();
             store.insert_node(vec![1, 2], 10, 1);
             store.insert_node(vec![3], 20, 2);
             store.insert_node(vec![4], 30, 3);
@@ -317,7 +323,7 @@ mod tests {
         }
 
         {
-            let store = NodeStore::open(path).unwrap();
+            let store = NodeStore::open(path, Consistency::immediate()).unwrap();
             assert_eq!(store.len(), 3);
             let n0 = store.get(0).unwrap();
             assert_eq!(n0.labels, vec![1, 2]);
@@ -332,7 +338,7 @@ mod tests {
         let path = dir.path();
 
         {
-            let store = NodeStore::open(path).unwrap();
+            let store = NodeStore::open(path, Consistency::immediate()).unwrap();
             store.insert_node(vec![1], 0, 1);
             store.insert_node(vec![2], 0, 1);
             store.insert_node(vec![3], 0, 1);
@@ -341,7 +347,7 @@ mod tests {
         }
 
         {
-            let store = NodeStore::open(path).unwrap();
+            let store = NodeStore::open(path, Consistency::immediate()).unwrap();
             assert_eq!(store.len(), 2);
             assert!(store.get(1).is_none());
             assert!(store.get(0).is_some());
@@ -355,7 +361,7 @@ mod tests {
         let path = dir.path();
 
         {
-            let store = NodeStore::open(path).unwrap();
+            let store = NodeStore::open(path, Consistency::immediate()).unwrap();
             let id = store.insert_node(vec![0], 0, 1);
             store.update_labels(id, vec![99]);
             store.update_props_row(id, 55);
@@ -364,7 +370,7 @@ mod tests {
         }
 
         {
-            let store = NodeStore::open(path).unwrap();
+            let store = NodeStore::open(path, Consistency::immediate()).unwrap();
             let n = store.get(0).unwrap();
             assert_eq!(n.labels, vec![99]);
             assert_eq!(n.props_row, 55);

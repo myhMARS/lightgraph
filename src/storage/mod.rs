@@ -7,6 +7,7 @@
 pub mod node_store;
 pub mod edge_store;
 pub mod prop_store;
+pub mod consistency;
 pub mod store_log;
 pub mod wal_thread;
 
