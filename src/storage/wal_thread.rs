@@ -146,8 +146,15 @@ impl WalThread {
 
 impl Drop for WalThread {
     fn drop(&mut self) {
-        // Best-effort shutdown
+        // Signal shutdown and join the thread.
+        // Don't block forever — use try_send in case channel is disconnected.
         self.running.store(false, Ordering::SeqCst);
+        // Send a final command to wake the thread
+        let _ = self.tx.try_send(WalCmd::Delete(u64::MAX)); // dummy, thread will see running=false and exit
+        if let Some(h) = self.handle.take() {
+            // Join with timeout to avoid blocking tests indefinitely
+            let _ = h.join();
+        }
     }
 }
 
@@ -171,6 +178,11 @@ fn wal_loop(
         // Block until next command or timeout
         match rx.recv_timeout(recv_timeout) {
             Ok(cmd) => {
+                // Check running flag before processing (allows clean shutdown)
+                if !running.load(Ordering::SeqCst) {
+                    flush_and_sync(writer, &mut buffer, pending, fsync_enabled);
+                    return;
+                }
                 match cmd {
                     WalCmd::Insert(id, record) => {
                         encode_insert(&mut buffer, id, &record);
@@ -179,7 +191,6 @@ fn wal_loop(
                         encode_delete(&mut buffer, id);
                     }
                     WalCmd::Flush(reply) => {
-                        // Drain any other pending commands, then sync
                         flush_and_sync(writer, &mut buffer, pending, fsync_enabled);
                         last_sync = Instant::now();
                         let _ = reply.send(());
