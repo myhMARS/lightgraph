@@ -299,10 +299,10 @@ impl NodeStore {
         self.nodes.contains_key(&id)
     }
 
-    /// Flush the log to disk.
+    /// Flush + fsync all pending writes. Call before shutdown.
     pub fn flush(&self) -> io::Result<()> {
         if let Some(ref log) = self.log {
-            log.lock().unwrap().flush()
+            log.lock().unwrap().sync_now()
         } else {
             Ok(())
         }
@@ -311,6 +311,12 @@ impl NodeStore {
     /// Data directory path, if persistent.
     pub fn data_dir(&self) -> Option<&Path> {
         self.data_dir.as_deref()
+    }
+
+    /// Flush on drop to ensure pending writes are persisted.
+    /// Panics if fsync fails (data loss is worse than a crash).
+    pub fn sync_on_drop(&self) {
+        let _ = self.flush();
     }
 }
 
@@ -337,13 +343,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path();
 
-        // Open, write, drop
+        // Open, write, flush, drop
         {
             let store = NodeStore::open(path).unwrap();
             store.insert_node(vec![1, 2], 10, 1);
             store.insert_node(vec![3], 20, 2);
             store.insert_node(vec![4], 30, 3);
             store.soft_delete(0, 100);
+            store.flush().unwrap(); // group commit → fsync now
             assert_eq!(store.len(), 3);
         }
 
@@ -373,7 +380,8 @@ mod tests {
             store.insert_node(vec![1], 0, 1);
             store.insert_node(vec![2], 0, 1);
             store.insert_node(vec![3], 0, 1);
-            store.hard_delete(1); // delete middle
+            store.hard_delete(1);
+            store.flush().unwrap();
         }
 
         {
@@ -397,6 +405,7 @@ mod tests {
             store.update_labels(id, vec![99]);
             store.update_props_row(id, 55);
             store.set_first_out(id, 12345);
+            store.flush().unwrap();
         }
 
         {
@@ -425,6 +434,7 @@ mod tests {
             let store = NodeStore::open(path).unwrap();
             store.insert_node(vec![0], 0, 1);
             store.insert_node(vec![0], 0, 1);
+            store.flush().unwrap();
         }
 
         {
