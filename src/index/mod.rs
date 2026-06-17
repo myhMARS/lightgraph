@@ -7,12 +7,3 @@
 pub mod fulltext;
 pub mod vector;
 pub mod property;
-
-use crate::types::NodeId;
-use roaring::RoaringBitmap;
-
-/// Common interface: every index returns scored candidates or filtered bitmaps.
-pub trait IndexSearch {
-    fn search(&self, query: &str) -> Vec<(NodeId, f32)>;
-    fn search_bitmap(&self, query: &str) -> RoaringBitmap;
-}

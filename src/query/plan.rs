@@ -3,7 +3,7 @@
 use crate::index::property::Predicate;
 use crate::query::builder::{Direction, TraversalClause};
 use crate::query::fusion::FusionMethod;
-use crate::query::query::FilterTiming;
+use super::FilterTiming;
 
 /// Compiled execution plan — no string parsing at execute time.
 #[derive(Debug, Clone)]

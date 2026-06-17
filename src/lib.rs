@@ -18,11 +18,11 @@ pub mod wal;
 pub mod snapshot;
 pub mod distributed;
 
-#[cfg(feature = "python")]
-pub mod pyo3;
+// #[cfg(feature = "python")]
+// pub mod pyo3;
 
-/// Core types used across all modules
-mod types {
+/// Core types used across all modules.
+pub mod types {
     pub type NodeId = u64;
     pub type EdgeId = u64;
     pub type LabelId = u32;
@@ -32,4 +32,5 @@ mod types {
 
     pub const NULL_NODE: NodeId = u64::MAX;
     pub const NULL_EDGE: EdgeId = u64::MAX;
+    pub const MAX_TX_ID: TxId = u64::MAX;
 }

@@ -7,6 +7,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 pub struct SnapshotManager {
     data_dir: PathBuf,
     current_snapshot_id: u64,
@@ -15,9 +17,10 @@ pub struct SnapshotManager {
     snapshot_max_wal_bytes: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
     pub latest_snapshot_id: u64,
-    pub latest_snapshot_path: PathBuf,
+    pub latest_snapshot_path: String,
     pub merged_wal_files: Vec<String>, // WAL files fully incorporated into snapshots
 }
 
@@ -27,8 +30,8 @@ impl SnapshotManager {
             data_dir: data_dir.to_path_buf(),
             current_snapshot_id: 0,
             wal_since_snapshot: 0,
-            snapshot_interval_ms: 600_000, // 10 minutes
-            snapshot_max_wal_bytes: 536_870_912, // 512 MB
+            snapshot_interval_ms: 600_000,        // 10 minutes
+            snapshot_max_wal_bytes: 536_870_912,  // 512 MB
         }
     }
 
@@ -38,14 +41,12 @@ impl SnapshotManager {
             || self.current_snapshot_id == 0
     }
 
-    /// Write a full snapshot of the database state.
-    /// Uses FlatBuffers for zero-copy deserialization on load.
-    pub fn write_snapshot(&mut self, db: &super::Database) -> std::io::Result<u64> {
+    /// Write a full snapshot. Placeholder — Sprint 4.
+    pub fn write_snapshot(&mut self) -> std::io::Result<u64> {
         let id = self.current_snapshot_id + 1;
-        let path = self.data_dir.join(format!("snapshot-{:04}.flat", id));
+        let _path = self.data_dir.join(format!("snapshot-{:04}.flat", id));
 
-        // Serialize nodes, edges, and index metadata via FlatBuffers
-        // Placeholder — Sprint 4
+        // TODO: Serialize nodes, edges, and index metadata via FlatBuffers
         self.current_snapshot_id = id;
         self.wal_since_snapshot = 0;
         Ok(id)
@@ -53,9 +54,8 @@ impl SnapshotManager {
 
     /// Load latest snapshot via mmap (zero-copy).
     pub fn load_latest(&self) -> std::io::Result<()> {
-        let manifest = self.read_manifest()?;
-        // mmap the flatbuffers file and reconstruct indexes
-        // Placeholder — Sprint 4
+        let _manifest = self.read_manifest()?;
+        // TODO: mmap the flatbuffers file and reconstruct indexes
         Ok(())
     }
 

@@ -29,6 +29,7 @@ pub struct QueryBuilder {
     limit: usize,
 }
 
+#[derive(Debug, Clone)]
 pub struct TraversalClause {
     pub etype: String,
     pub direction: Direction,
@@ -38,6 +39,7 @@ pub struct TraversalClause {
     pub node_predicates: Vec<Predicate>,
 }
 
+#[derive(Debug, Clone)]
 pub enum Direction {
     Out,
     In,

@@ -83,7 +83,7 @@ pub fn hybrid_search(
 
     if use_pre_filter {
         // Pre-filter: only score candidates that pass the predicate
-        let candidates: Vec<NodeId> = filter_bm.iter().collect();
+        let candidates: Vec<NodeId> = filter_bm.iter().map(|id| id as NodeId).collect();
 
         for &node_id in &candidates {
             let mut score = 0.0;
@@ -124,7 +124,7 @@ pub fn hybrid_search(
         }
         // Remove candidates outside filter
         if !filter_bm.is_empty() {
-            scores.retain(|id, _| filter_bm.contains(*id));
+            scores.retain(|id, _| filter_bm.contains(*id as u32));
         }
     }
 

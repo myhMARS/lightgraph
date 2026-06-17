@@ -5,33 +5,35 @@
 // Writes create new versions tagged with the TxId.
 // Conflicts detected at commit time (first-committer-wins).
 
-use crate::types::TxId;
-use atomic::Atomic;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use parking_lot::RwLock;
 
+use crate::types::TxId;
+
 pub struct TxManager {
-    next_tx_id: atomic::AtomicU64,
-    committed_tx_id: atomic::AtomicU64,
+    next_tx_id: AtomicU64,
+    committed_tx_id: AtomicU64,
     active_writers: RwLock<Vec<TxId>>,
 }
 
 impl TxManager {
     pub fn new() -> Self {
         Self {
-            next_tx_id: atomic::AtomicU64::new(1), // 0 = bootstrap
-            committed_tx_id: atomic::AtomicU64::new(0),
+            next_tx_id: AtomicU64::new(1), // 0 = bootstrap
+            committed_tx_id: AtomicU64::new(0),
             active_writers: RwLock::new(Vec::new()),
         }
     }
 
     /// Begin a read transaction — returns the latest committed TxId.
     pub fn begin_read(&self) -> TxId {
-        self.committed_tx_id.load(atomic::Ordering::SeqCst)
+        self.committed_tx_id.load(Ordering::SeqCst)
     }
 
     /// Begin a write transaction — allocates a new TxId.
     pub fn begin_write(&self) -> TxId {
-        let id = self.next_tx_id.fetch_add(1, atomic::Ordering::SeqCst);
+        let id = self.next_tx_id.fetch_add(1, Ordering::SeqCst);
         self.active_writers.write().push(id);
         id
     }
@@ -43,7 +45,7 @@ impl TxManager {
         writers.retain(|&t| t != tx_id);
         // First-committer-wins: check no earlier active tx committed conflicting versions
         // Full conflict detection in Sprint 2
-        self.committed_tx_id.store(tx_id, atomic::Ordering::SeqCst);
+        self.committed_tx_id.store(tx_id, Ordering::SeqCst);
         true
     }
 
@@ -54,6 +56,6 @@ impl TxManager {
     }
 
     pub fn latest_committed(&self) -> TxId {
-        self.committed_tx_id.load(atomic::Ordering::SeqCst)
+        self.committed_tx_id.load(Ordering::SeqCst)
     }
 }

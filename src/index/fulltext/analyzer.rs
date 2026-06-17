@@ -28,7 +28,7 @@ impl CjkAnalyzer {
         while i < chars.len() {
             let c = chars[i];
 
-            if c is_cjk(c) {
+            if is_cjk(c) {
                 // Overlapping bigram
                 if i + 1 < chars.len() && is_cjk(chars[i + 1]) {
                     let bigram: String = chars[i..=i + 1].iter().collect();

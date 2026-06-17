@@ -14,16 +14,21 @@ pub use analyzer::CjkAnalyzer;
 pub use scorer::bm25_score;
 
 use crate::types::{NodeId, Score};
-use crate::index::IndexSearch;
+use dashmap::DashMap;
 use fst::Map as FstMap;
 use roaring::RoaringBitmap;
-use dashmap::DashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use parking_lot::RwLock;
 
 pub struct FullTextIndex {
+    /// Human-readable name for this index
+    #[allow(dead_code)]
     name: String,
     /// Labels covered by this index
+    #[allow(dead_code)]
     labels: Vec<String>,
     /// Properties indexed
+    #[allow(dead_code)]
     properties: Vec<String>,
     /// FST: term → ordinal (compact trie)
     fst: Option<FstMap<Vec<u8>>>,
@@ -33,8 +38,8 @@ pub struct FullTextIndex {
     positions: Vec<DashMap<NodeId, Vec<u32>>>,
     /// Per-document term count (for BM25)
     doc_lengths: DashMap<NodeId, u32>,
-    total_docs: atomic::AtomicU64,
-    avg_doc_length: atomic::AtomicF64,
+    total_docs: AtomicU64,
+    avg_doc_length: RwLock<f64>,
 }
 
 impl FullTextIndex {
@@ -47,24 +52,25 @@ impl FullTextIndex {
             postings: Vec::new(),
             positions: Vec::new(),
             doc_lengths: DashMap::new(),
-            total_docs: atomic::AtomicU64::new(0),
-            avg_doc_length: atomic::AtomicF64::new(0.0),
+            total_docs: AtomicU64::new(0),
+            avg_doc_length: RwLock::new(0.0),
         }
     }
 
     pub fn search(&self, query: &str) -> Vec<(NodeId, Score)> {
         let tokens = CjkAnalyzer::tokenize(query);
-        let mut results: dashmap::DashMap<NodeId, Score> = dashmap::DashMap::new();
+        let mut results: DashMap<NodeId, Score> = DashMap::new();
 
         if let Some(ref fst) = self.fst {
             for token in &tokens {
-                if let Some(ordinal) = fst.get(token.as_bytes()) {
+                if let Some(ordinal) = fst.get(token.term.as_bytes()) {
                     let posting = &self.postings[ordinal as usize];
                     let df = posting.len() as f64;
-                    let total = self.total_docs.load(atomic::Ordering::Relaxed) as f64;
-                    let avg_dl = self.avg_doc_length.load(atomic::Ordering::Relaxed);
+                    let total = self.total_docs.load(Ordering::Relaxed) as f64;
+                    let avg_dl = *self.avg_doc_length.read();
 
-                    for node_id in posting.iter() {
+                    for node_id_u32 in posting.iter() {
+                        let node_id = node_id_u32 as NodeId;
                         let tf = self.count_tf(ordinal as usize, node_id);
                         let dl = self.doc_lengths.get(&node_id)
                             .map(|r| *r as f32).unwrap_or(1.0);
