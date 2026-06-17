@@ -2,23 +2,24 @@
 //!
 //! ## Design
 //!
-//! - **Slab allocation**: freed IDs are recycled via a free-list (`Vec<NodeId>`),
-//!   protected by a `parking_lot::Mutex`. Allocation pops from free-list first,
-//!   falls back to `next_id` counter.
+//! - **Lock-free slab allocation**: freed IDs are recycled via a
+//!   `crossbeam::queue::SegQueue` — no mutex contention on the write path.
+//!   `alloc_id` pops from the queue; when empty, bumps an atomic counter.
 //! - **MVCC soft-delete**: nodes are never physically removed on write transactions.
 //!   Instead, `deleted_tx` is set to the current TxId. Only transactions with
 //!   TxId < deleted_tx can see the node.
 //! - **Read path**: `DashMap::get()` is lock-free (sharded). No GC pause.
-//! - **Write path**: inserts and updates lock only the specific shard within DashMap.
-//!   Deletes push to the free-list mutex (very short critical section).
+//! - **Write path**: fully lock-free ID allocation (SegQueue + atomic counter).
+//!   DashMap internal shard locks still serialise writes to the same shard,
+//!   but writes to different shards proceed in parallel.
 //! - **Hard delete**: `compact()` physically removes nodes deleted before the
 //!   oldest active transaction. This is called by the snapshot/garbage-collection
 //!   process, not on the hot write path.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
-use parking_lot::Mutex;
 
 use super::Node;
 use crate::types::{NodeId, LabelId, TxId};
@@ -31,8 +32,11 @@ pub struct NodeStore {
     /// Monotonic counter for fresh allocations (when free-list is empty).
     next_id: AtomicU64,
 
-    /// Recycled NodeIds from hard-deleted nodes.
-    free_list: Mutex<Vec<NodeId>>,
+    /// Recycled NodeIds from hard-deleted nodes. Lock-free MPMC queue.
+    free_list: SegQueue<NodeId>,
+
+    /// Approximate count of recycled IDs in the free-list.
+    free_count: AtomicU64,
 
     /// Total node count including soft-deleted (for statistics).
     total_ever: AtomicU64,
@@ -46,7 +50,8 @@ impl NodeStore {
         Self {
             nodes: DashMap::with_capacity(1_000_000),
             next_id: AtomicU64::new(0),
-            free_list: Mutex::new(Vec::new()),
+            free_list: SegQueue::new(),
+            free_count: AtomicU64::new(0),
             total_ever: AtomicU64::new(0),
         }
     }
@@ -56,21 +61,22 @@ impl NodeStore {
         Self {
             nodes: DashMap::with_capacity(cap),
             next_id: AtomicU64::new(0),
-            free_list: Mutex::new(Vec::new()),
+            free_list: SegQueue::new(),
+            free_count: AtomicU64::new(0),
             total_ever: AtomicU64::new(0),
         }
     }
 
-    // ── ID allocation ──────────────────────────────────────────────
+    // ── ID allocation (lock-free) ──────────────────────────────────
 
-    /// Allocate a fresh NodeId. Recycles from free-list if available.
+    /// Allocate a fresh NodeId. Recycles from the lock-free queue if available,
+    /// otherwise bumps the atomic counter.
+    #[inline]
     fn alloc_id(&self) -> NodeId {
-        // Fast path: try free-list first
-        {
-            let mut fl = self.free_list.lock();
-            if let Some(id) = fl.pop() {
-                return id;
-            }
+        // Fast path: try the lock-free free-list
+        if let Some(id) = self.free_list.pop() {
+            self.free_count.fetch_sub(1, Ordering::Relaxed);
+            return id;
         }
         // Slow path: bump counter (free-list was empty)
         self.next_id.fetch_add(1, Ordering::SeqCst)
@@ -79,8 +85,6 @@ impl NodeStore {
     // ── CRUD ──────────────────────────────────────────────────────
 
     /// Insert a new node. Returns the allocated NodeId.
-    ///
-    /// The caller should have already assigned labels and props_row.
     pub fn insert_node(
         &self,
         labels: Vec<LabelId>,
@@ -96,17 +100,13 @@ impl NodeStore {
 
     /// Get a reference to a node by ID.
     ///
-    /// Returns `None` if the node does not exist or has been
-    /// hard-deleted. Soft-deleted nodes are still reachable via
-    /// this method (MVCC visibility is checked by the caller).
+    /// Returns `None` if the node does not exist or has been hard-deleted.
     #[inline]
     pub fn get(&self, id: NodeId) -> Option<dashmap::mapref::one::Ref<'_, NodeId, Node>> {
         self.nodes.get(&id)
     }
 
     /// Get a mutable reference to a node (for updates).
-    ///
-    /// Returns `None` if the node doesn't exist.
     #[inline]
     pub fn get_mut(&self, id: NodeId) -> Option<dashmap::mapref::one::RefMut<'_, NodeId, Node>> {
         self.nodes.get_mut(&id)
@@ -171,14 +171,15 @@ impl NodeStore {
         }
     }
 
-    /// Hard-delete a node: physically removes it and returns its ID
-    /// to the free-list.
+    /// Hard-delete a node: physically removes it and pushes its ID
+    /// to the lock-free free-list.
     ///
     /// Only call this during compaction when no active transaction can
     /// see this node.
     pub fn hard_delete(&self, id: NodeId) -> bool {
         if self.nodes.remove(&id).is_some() {
-            self.free_list.lock().push(id);
+            self.free_list.push(id);
+            self.free_count.fetch_add(1, Ordering::Relaxed);
             true
         } else {
             false
@@ -190,7 +191,7 @@ impl NodeStore {
     /// Return all NodeIds visible to the given transaction snapshot.
     ///
     /// This scans the entire map — use sparingly (e.g., for full scans
-    /// or index rebuilds). The scan can be parallelised if needed.
+    /// or index rebuilds).
     pub fn visible_nodes(&self, tx: TxId) -> Vec<NodeId> {
         self.nodes
             .iter()
@@ -219,9 +220,12 @@ impl NodeStore {
         self.nodes.len()
     }
 
-    /// Free-list size (recyclable IDs).
-    pub fn free_count(&self) -> usize {
-        self.free_list.lock().len()
+    /// Approximate free-list size (recyclable IDs).
+    ///
+    /// This is approximate because concurrent pushes/pops make the exact count
+    /// momentarily inconsistent.
+    pub fn free_count(&self) -> u64 {
+        self.free_count.load(Ordering::Relaxed)
     }
 
     /// Next fresh ID value.
@@ -269,7 +273,6 @@ mod tests {
     use super::*;
     use crate::types::MAX_TX_ID;
 
-    // Helper to create a simple NodeStore for testing.
     fn mk_store() -> NodeStore {
         NodeStore::with_capacity(64)
     }
@@ -279,7 +282,6 @@ mod tests {
     #[test]
     fn test_alloc_monotonic() {
         let store = mk_store();
-        // No deletes → IDs should be 0, 1, 2, ...
         assert_eq!(store.alloc_id(), 0);
         assert_eq!(store.alloc_id(), 1);
         assert_eq!(store.alloc_id(), 2);
@@ -288,19 +290,15 @@ mod tests {
     #[test]
     fn test_alloc_reuse_after_hard_delete() {
         let store = mk_store();
-        // Must use insert_node (which inserts into the map) for hard_delete to work
         let id0 = store.insert_node(vec![0], 0, 1);
         let id1 = store.insert_node(vec![1], 1, 1);
         let _id2 = store.insert_node(vec![2], 2, 1);
 
-        // Hard-delete id1 (physically removes from map + pushes to free list)
         store.hard_delete(id1);
 
-        // Next insert should grab id1 from free-list
         let recycled = store.insert_node(vec![3], 3, 2);
         assert_eq!(recycled, id1);
 
-        // Then continue from fresh counter
         let fresh = store.insert_node(vec![4], 4, 2);
         assert_eq!(fresh, 3);
     }
@@ -371,10 +369,8 @@ mod tests {
     fn test_node_visible_after_create() {
         let store = mk_store();
         let id = store.insert_node(vec![0], 0, 3);
-        // Any tx ≥ created_tx can see it (but < deleted_tx, which is MAX_TX_ID)
         assert!(store.get(id).unwrap().is_alive(5));
         assert!(store.get(id).unwrap().is_alive(1_000_000));
-        // MAX_TX_ID itself fails (deleted_tx > tx is false when both are MAX_TX_ID)
         assert!(!store.get(id).unwrap().is_alive(u64::MAX));
     }
 
@@ -390,14 +386,12 @@ mod tests {
     fn test_soft_delete_makes_node_invisible() {
         let store = mk_store();
         let id = store.insert_node(vec![0], 0, 1);
-
-        // Soft-delete at tx 5
         store.soft_delete(id, 5);
 
         let node = store.get(id).unwrap();
-        assert!(node.is_alive(4));  // before delete → visible
-        assert!(!node.is_alive(5)); // at delete → not visible
-        assert!(!node.is_alive(6)); // after delete → not visible
+        assert!(node.is_alive(4));
+        assert!(!node.is_alive(5));
+        assert!(!node.is_alive(6));
     }
 
     #[test]
@@ -412,7 +406,6 @@ mod tests {
     fn test_update_labels() {
         let store = mk_store();
         let id = store.insert_node(vec![0], 0, 1);
-
         assert!(store.update_labels(id, vec![42, 99]));
         assert_eq!(store.get(id).unwrap().labels, vec![42, 99]);
     }
@@ -427,7 +420,6 @@ mod tests {
     fn test_update_props_row() {
         let store = mk_store();
         let id = store.insert_node(vec![0], 0, 1);
-
         assert!(store.update_props_row(id, 77));
         assert_eq!(store.get(id).unwrap().props_row, 77);
     }
@@ -437,10 +429,8 @@ mod tests {
         let store = mk_store();
         let id = store.insert_node(vec![0], 0, 1);
         let eid = 100u64;
-
         assert!(store.set_first_out(id, eid));
         assert!(store.set_first_in(id, eid + 1));
-
         let node = store.get(id).unwrap();
         assert_eq!(node.first_out, 100);
         assert_eq!(node.first_in, 101);
@@ -453,7 +443,6 @@ mod tests {
         let store = mk_store();
         let id = store.insert_node(vec![0], 0, 1);
         assert!(store.contains(id));
-
         assert!(store.hard_delete(id));
         assert!(!store.contains(id));
         assert!(store.get(id).is_none());
@@ -470,7 +459,6 @@ mod tests {
         let store = mk_store();
         let id = store.insert_node(vec![0], 0, 1);
         let old_free = store.free_count();
-
         store.hard_delete(id);
         assert_eq!(store.free_count(), old_free + 1);
     }
@@ -480,20 +468,19 @@ mod tests {
     #[test]
     fn test_visible_nodes_respects_mvcc() {
         let store = mk_store();
-        let n0 = store.insert_node(vec![0], 0, 1);   // created at tx 1
-        let n1 = store.insert_node(vec![1], 1, 3);   // created at tx 3
-        let n2 = store.insert_node(vec![2], 2, 5);   // created at tx 5
-
-        store.soft_delete(n1, 10); // deleted at tx 10
+        let n0 = store.insert_node(vec![0], 0, 1);
+        let n1 = store.insert_node(vec![1], 1, 3);
+        let n2 = store.insert_node(vec![2], 2, 5);
+        store.soft_delete(n1, 10);
 
         let vis_tx4 = store.visible_nodes(4);
-        assert!(vis_tx4.contains(&n0));  // created 1 ≤ 4
-        assert!(vis_tx4.contains(&n1));  // created 3 ≤ 4
-        assert!(!vis_tx4.contains(&n2)); // created 5 > 4
+        assert!(vis_tx4.contains(&n0));
+        assert!(vis_tx4.contains(&n1));
+        assert!(!vis_tx4.contains(&n2));
 
         let vis_tx100 = store.visible_nodes(100);
         assert!(vis_tx100.contains(&n0));
-        assert!(!vis_tx100.contains(&n1)); // deleted 10 ≤ 100
+        assert!(!vis_tx100.contains(&n1));
         assert!(vis_tx100.contains(&n2));
     }
 
@@ -503,10 +490,9 @@ mod tests {
         store.insert_node(vec![0], 0, 1);
         store.insert_node(vec![0], 1, 1);
         store.insert_node(vec![0], 2, 1);
-
         store.soft_delete(0, 5);
-        assert_eq!(store.visible_count(1), 3); // all visible at tx1
-        assert_eq!(store.visible_count(10), 2); // n0 deleted at 5
+        assert_eq!(store.visible_count(1), 3);
+        assert_eq!(store.visible_count(10), 2);
     }
 
     // ──────────────── Compaction ────────────────
@@ -516,14 +502,13 @@ mod tests {
         let store = mk_store();
         let n0 = store.insert_node(vec![0], 0, 1);
         let n1 = store.insert_node(vec![1], 1, 1);
-
-        store.soft_delete(n0, 5); // deleted at tx 5
-        store.soft_delete(n1, 8); // deleted at tx 8
+        store.soft_delete(n0, 5);
+        store.soft_delete(n1, 8);
 
         let removed = store.compact(7);
-        assert_eq!(removed, 1); // only n0 deleted before tx 7
+        assert_eq!(removed, 1);
         assert!(!store.contains(n0));
-        assert!(store.contains(n1)); // still there (deleted at 8 ≥ 7)
+        assert!(store.contains(n1));
     }
 
     #[test]
@@ -531,7 +516,6 @@ mod tests {
         let store = mk_store();
         store.insert_node(vec![0], 0, 1);
         store.insert_node(vec![0], 1, 1);
-
         let removed = store.compact(100);
         assert_eq!(removed, 0);
         assert_eq!(store.len(), 2);
@@ -556,8 +540,6 @@ mod tests {
             assert_eq!(id, i);
         }
         assert_eq!(store.len(), 5000);
-
-        // Spot-check random nodes
         assert!(store.get(0).is_some());
         assert!(store.get(2500).is_some());
         assert!(store.get(4999).is_some());
@@ -596,18 +578,14 @@ mod tests {
 
         let store = Arc::new(NodeStore::with_capacity(64));
 
-        // Pre-populate
         let mut ids = Vec::new();
         for _ in 0..100 {
             ids.push(store.insert_node(vec![0], 0, 1));
         }
-
-        // Delete all
         for &id in &ids {
             store.hard_delete(id);
         }
 
-        // Re-insert concurrently — all should reuse freed ids
         let mut handles = Vec::new();
         for _ in 0..4 {
             let s = Arc::clone(&store);
@@ -626,9 +604,7 @@ mod tests {
         }
 
         all_new.sort();
-        // All reused ids should be < 100 (since we recycled)
         assert!(all_new.iter().all(|&id| id < 100));
-        // No duplicates
         all_new.dedup();
         assert_eq!(all_new.len(), 100);
     }
