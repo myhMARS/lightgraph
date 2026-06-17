@@ -67,7 +67,7 @@ impl NodeStore {
     /// Open with dedicated WAL thread.
     pub fn open(data_dir: &Path) -> io::Result<Self> {
         std::fs::create_dir_all(data_dir)?;
-        let wal_path = data_dir.join("wal.log");
+        let wal_path = data_dir.join("nodes.wal");
 
         let mut store = Self {
             nodes: DashMap::with_capacity(1_000_000),
@@ -104,9 +104,9 @@ impl NodeStore {
             store.next_id.store(max_id + 1, Ordering::SeqCst);
         }
 
-        // Spawn WAL thread (64KB batch, 5ms timeout, 4096 channel capacity)
+        // Spawn WAL thread → data_dir/nodes.wal
         store.wal = Some(WalThread::spawn(
-            data_dir,
+            &data_dir.join("nodes.wal"),
             65536,
             Duration::from_millis(5),
             4096,

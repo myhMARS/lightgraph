@@ -54,18 +54,19 @@ pub struct WalThread {
 impl WalThread {
     /// Spawn the WAL thread.
     ///
-    /// - `data_dir`: where to create `wal.log`
+    /// - `log_path`: path to the WAL file (e.g. `data/nodes.wal`)
     /// - `batch_size`: fsync every N bytes (default 64KB)
     /// - `batch_timeout`: fsync if nothing received for this long (default 5ms)
     /// - `channel_cap`: capacity of the crossbeam channel (default 4096)
     pub fn spawn(
-        data_dir: &Path,
+        log_path: &Path,
         batch_size: usize,
         batch_timeout: Duration,
         channel_cap: usize,
     ) -> io::Result<Self> {
-        std::fs::create_dir_all(data_dir)?;
-        let log_path = data_dir.join("wal.log");
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
 
         let exists = log_path.exists() && std::fs::metadata(&log_path)?.len() > 0;
 
