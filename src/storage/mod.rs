@@ -8,6 +8,7 @@ pub mod node_store;
 pub mod edge_store;
 pub mod prop_store;
 pub mod store_log;
+pub mod wal_thread;
 
 use crate::types::{NodeId, EdgeId, LabelId, TypeId, TxId, NULL_EDGE, MAX_TX_ID};
 
