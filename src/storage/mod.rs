@@ -24,7 +24,7 @@ pub struct Node {
 }
 
 /// A directed Edge between two nodes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Edge {
     pub id: EdgeId,
     pub src: NodeId,

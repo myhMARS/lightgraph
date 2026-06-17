@@ -10,11 +10,14 @@
 //! - MVCC soft-delete via `deleted_tx`.
 //! - Adjacency-chain helpers for linking/unlinking edges to nodes.
 
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
 
+use super::store_log::StoreLog;
 use super::Edge;
 use crate::types::{EdgeId, NodeId, TypeId, NULL_EDGE};
 
@@ -23,16 +26,17 @@ pub struct EdgeStore {
     next_id: AtomicU64,
     free_list: SegQueue<EdgeId>,
     free_count: AtomicU64,
+    log: Option<std::sync::Mutex<StoreLog>>,
 }
 
 impl EdgeStore {
-    /// Create with default capacity (3M edges — typical 3:1 edge-to-node ratio).
     pub fn new() -> Self {
         Self {
             edges: DashMap::with_capacity(3_000_000),
             next_id: AtomicU64::new(0),
             free_list: SegQueue::new(),
             free_count: AtomicU64::new(0),
+            log: None,
         }
     }
 
@@ -42,6 +46,63 @@ impl EdgeStore {
             next_id: AtomicU64::new(0),
             free_list: SegQueue::new(),
             free_count: AtomicU64::new(0),
+            log: None,
+        }
+    }
+
+    /// Open a persistent EdgeStore. Replays edges.log to rebuild memory state.
+    pub fn open(data_dir: &Path) -> io::Result<Self> {
+        std::fs::create_dir_all(data_dir)?;
+        let log_path = data_dir.join("edges.log");
+
+        let mut store = Self {
+            edges: DashMap::with_capacity(3_000_000),
+            next_id: AtomicU64::new(0),
+            free_list: SegQueue::new(),
+            free_count: AtomicU64::new(0),
+            log: None,
+        };
+
+        if log_path.exists() {
+            let mut max_id: u64 = 0;
+            super::store_log::replay_log(&log_path, |opcode, payload| {
+                match opcode {
+                    1 => {
+                        if let Ok(edge) = bincode::deserialize::<Edge>(payload) {
+                            max_id = max_id.max(edge.id);
+                            store.edges.insert(edge.id, edge);
+                        }
+                    }
+                    2 => {
+                        if payload.len() >= 8 {
+                            let id = u64::from_le_bytes(payload[..8].try_into().unwrap());
+                            if store.edges.remove(&id).is_some() {
+                                store.free_list.push(id);
+                                store.free_count.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            })?;
+            store.next_id.store(max_id + 1, Ordering::SeqCst);
+        }
+
+        store.log = Some(std::sync::Mutex::new(StoreLog::open(&log_path)?));
+        Ok(store)
+    }
+
+    fn persist_edge(&self, edge: &Edge) {
+        if let Some(ref log) = self.log {
+            if let Ok(payload) = bincode::serialize(edge) {
+                let _ = log.lock().unwrap().append_insert(&payload);
+            }
+        }
+    }
+
+    fn persist_delete(&self, id: EdgeId) {
+        if let Some(ref log) = self.log {
+            let _ = log.lock().unwrap().append_delete(&id.to_le_bytes());
         }
     }
 
@@ -73,6 +134,7 @@ impl EdgeStore {
     ) -> EdgeId {
         let id = self.alloc_id();
         let edge = Edge::new(id, src, dst, etype, props_row, tx_id);
+        self.persist_edge(&edge);
         self.edges.insert(id, edge);
         id
     }
@@ -99,6 +161,11 @@ impl EdgeStore {
             e.next_in = *dst_first_in;
         }
         *dst_first_in = new_edge;
+
+        // Persist updated edge
+        if let Some(e) = self.edges.get(&new_edge) {
+            self.persist_edge(&e);
+        }
     }
 
     /// Unlink an edge from its source and destination chains.
@@ -116,7 +183,8 @@ impl EdgeStore {
             None => return false,
         };
 
-        // Unlink from src out-chain
+        // Unlink from src out-chain; remember predecessor to persist afterward
+        let mut src_pred: Option<EdgeId> = None;
         if *src_first_out == edge_id {
             *src_first_out = edge.next_out;
         } else {
@@ -125,6 +193,7 @@ impl EdgeStore {
                 if let Some(mut e) = self.edges.get_mut(&cur) {
                     if e.next_out == edge_id {
                         e.next_out = edge.next_out;
+                        src_pred = Some(cur);
                         break;
                     }
                     cur = e.next_out;
@@ -135,6 +204,7 @@ impl EdgeStore {
         }
 
         // Unlink from dst in-chain
+        let mut dst_pred: Option<EdgeId> = None;
         if *dst_first_in == edge_id {
             *dst_first_in = edge.next_in;
         } else {
@@ -143,12 +213,25 @@ impl EdgeStore {
                 if let Some(mut e) = self.edges.get_mut(&cur) {
                     if e.next_in == edge_id {
                         e.next_in = edge.next_in;
+                        dst_pred = Some(cur);
                         break;
                     }
                     cur = e.next_in;
                 } else {
                     break;
                 }
+            }
+        }
+
+        // Persist predecessors (their next_out/next_in changed)
+        if let Some(id) = src_pred {
+            if let Some(e) = self.edges.get(&id) {
+                self.persist_edge(&e);
+            }
+        }
+        if let Some(id) = dst_pred {
+            if let Some(e) = self.edges.get(&id) {
+                self.persist_edge(&e);
             }
         }
 
@@ -170,14 +253,19 @@ impl EdgeStore {
         match self.edges.get_mut(&id) {
             Some(mut e) => {
                 e.deleted_tx = tx_id;
+                // Persist updated edge
+                if let Some(edge) = self.edges.get(&id) {
+                    self.persist_edge(&edge);
+                }
                 true
             }
             None => false,
         }
     }
 
-    /// Hard-delete and recycle the ID.
+    /// Hard-delete: persist delete record, remove from memory, recycle ID.
     pub fn hard_delete(&self, id: EdgeId) -> bool {
+        self.persist_delete(id);
         if self.edges.remove(&id).is_some() {
             self.free_list.push(id);
             self.free_count.fetch_add(1, Ordering::Relaxed);

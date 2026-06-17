@@ -4,15 +4,17 @@
 //! - Each column is a `Vec<Option<Value>>`, indexed by `row_id` (u32).
 //! - Columns are stored in a `DashMap<(LabelId, String), RwLock<PropertyColumn>>`
 //!   — lock-free reads for column lookup, fine-grained locking for writes.
-//! - Inserting a row appends to ALL columns for that label simultaneously.
-//! - Values stored as `Option<Value>` — `None` means the property was not set for
-//!   that row. This allows sparse property sets across nodes.
+//! - Write-through persistence: each mutation logs the serialized column to disk.
+//! - Recovery replays the log to rebuild all columns.
 
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
 
+use super::store_log::StoreLog;
 use crate::types::LabelId;
 
 /// Supported value types in properties.
@@ -134,6 +136,8 @@ pub struct PropStore {
     columns: DashMap<(LabelId, String), RwLock<PropertyColumn>>,
     /// Per-label row counter
     schemas: DashMap<LabelId, LabelSchema>,
+    /// Persistent log (None = memory-only).
+    log: Option<std::sync::Mutex<StoreLog>>,
 }
 
 impl PropStore {
@@ -141,6 +145,61 @@ impl PropStore {
         Self {
             columns: DashMap::new(),
             schemas: DashMap::new(),
+            log: None,
+        }
+    }
+
+    /// Open a persistent PropStore.
+    pub fn open(data_dir: &Path) -> io::Result<Self> {
+        std::fs::create_dir_all(data_dir)?;
+        let log_path = data_dir.join("props.log");
+
+        let mut store = Self {
+            columns: DashMap::new(),
+            schemas: DashMap::new(),
+            log: None,
+        };
+
+        if log_path.exists() {
+            super::store_log::replay_log(&log_path, |opcode, payload| {
+                if opcode == 1 {
+                    // Payload: [label_id: u32 LE][prop_name_len: u8][prop_name: bytes][values: bincode...]
+                    if payload.len() < 6 { return; }
+                    let label = u32::from_le_bytes(payload[..4].try_into().unwrap());
+                    let name_len = payload[4] as usize;
+                    if payload.len() < 5 + name_len { return; }
+                    let prop_name = String::from_utf8_lossy(&payload[5..5+name_len]).to_string();
+                    let val_data = &payload[5+name_len..];
+                    if let Ok(values) = bincode::deserialize::<Vec<Option<Value>>>(val_data) {
+                        let len = values.len() as u32;
+                        let col = PropertyColumn { values };
+                        store.columns.insert((label, prop_name.clone()), RwLock::new(col));
+                        // Update row counter
+                        store.schemas.entry(label).or_insert_with(LabelSchema::new)
+                            .next_row.fetch_max(len, Ordering::SeqCst);
+                    }
+                }
+            })?;
+        }
+
+        store.log = Some(std::sync::Mutex::new(StoreLog::open(&log_path)?));
+        Ok(store)
+    }
+
+    /// Persist a column to disk.
+    fn persist_column(&self, label: LabelId, prop_name: &str) {
+        if let Some(ref log) = self.log {
+            if let Some(col) = self.columns.get(&(label, prop_name.to_string())) {
+                let col = col.read();
+                let mut payload: Vec<u8> = Vec::new();
+                payload.extend_from_slice(&label.to_le_bytes());
+                payload.push(prop_name.len() as u8);
+                payload.extend_from_slice(prop_name.as_bytes());
+                if let Ok(val_data) = bincode::serialize(&col.values) {
+                    payload.extend_from_slice(&val_data);
+                    let _ = log.lock().unwrap().append_insert(&payload);
+                }
+            }
         }
     }
 
@@ -168,6 +227,8 @@ impl PropStore {
         let mut col = col.write();
         col.extend_to(row as usize + 1);
         col.set(row, value);
+        drop(col); // release RwLock before persist
+        self.persist_column(label, prop);
         row
     }
 
@@ -185,10 +246,14 @@ impl PropStore {
     /// Set a single property value. Returns false if out of bounds.
     pub fn set_prop(&self, label: LabelId, prop: &str, row: u32, value: Option<Value>) -> bool {
         let key = (label, prop.to_string());
-        match self.columns.get(&key) {
+        let ok = match self.columns.get(&key) {
             Some(col) => col.write().set(row, value),
             None => false,
+        };
+        if ok {
+            self.persist_column(label, prop);
         }
+        ok
     }
 
     // ── Batch row insert ──────────────────────────────────────────
