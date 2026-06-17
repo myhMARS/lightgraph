@@ -88,12 +88,13 @@ impl WalThread {
         let pending_clone = Arc::clone(&pending);
         let running_clone = Arc::clone(&running);
 
-        let batch_timeout = durability.batch_timeout();
         let batch_bytes = durability.batch_bytes();
         let fsync_enabled = durability.fsync_enabled();
+        // Channel recv timeout: use batch interval, but minimum 1ms to avoid busy loop
+        let recv_timeout = durability.batch_timeout().max(Duration::from_millis(1));
 
         let handle = thread::spawn(move || {
-            wal_loop(rx, &mut writer, batch_bytes, batch_timeout, fsync_enabled, &pending_clone, &running_clone);
+            wal_loop(rx, &mut writer, batch_bytes, recv_timeout, durability.batch_timeout(), fsync_enabled, &pending_clone, &running_clone);
         });
 
         Ok(Self {
@@ -151,11 +152,14 @@ impl Drop for WalThread {
 }
 
 /// The WAL thread main loop.
+/// - `recv_timeout`: how long to wait for channel messages (≥1ms to avoid busy loop)
+/// - `fsync_timeout`: how frequently to fsync (can be 0 for Immediate)
 fn wal_loop(
     rx: Receiver<WalCmd>,
     writer: &mut BufWriter<File>,
     batch_size: usize,
-    batch_timeout: Duration,
+    recv_timeout: Duration,
+    fsync_timeout: Duration,
     fsync_enabled: bool,
     pending: &AtomicU64,
     running: &AtomicBool,
@@ -165,7 +169,7 @@ fn wal_loop(
 
     loop {
         // Block until next command or timeout
-        match rx.recv_timeout(batch_timeout) {
+        match rx.recv_timeout(recv_timeout) {
             Ok(cmd) => {
                 match cmd {
                     WalCmd::Insert(id, record) => {
@@ -198,7 +202,7 @@ fn wal_loop(
 
         // Sync if buffer full or timed out
         let buffer_full = buffer.len() >= batch_size;
-        let timed_out = last_sync.elapsed() >= batch_timeout;
+        let timed_out = last_sync.elapsed() >= fsync_timeout;
 
         if (buffer_full || timed_out) && !buffer.is_empty() {
             flush_and_sync(writer, &mut buffer, pending, fsync_enabled);

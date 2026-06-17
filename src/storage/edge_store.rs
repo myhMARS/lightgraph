@@ -221,7 +221,12 @@ impl EdgeStore {
         match self.edges.get_mut(&id) {
             Some(mut e) => {
                 e.deleted_tx = tx_id;
-                if let Some(edge) = self.edges.get(&id) { self.wal_insert(id, &edge); }
+                // Serialize through RefMut — cannot call self.edges.get() while holding get_mut()
+                if let Some(ref wal) = self.wal {
+                    if let Ok(data) = bincode::serialize(&*e) {
+                        wal.send_insert(id, data);
+                    }
+                }
                 true
             }
             None => false,
