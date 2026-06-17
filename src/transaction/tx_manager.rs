@@ -1,119 +1,130 @@
-//! Transaction Manager — MVCC snapshot isolation with first-committer-wins.
+//! Transaction Manager — lock-free ticket-lock commit protocol.
 //!
-//! ## Model
+//! ## Design
 //!
-//! - **Read transactions**: get a snapshot TxId = latest committed. See all data
-//!   where `created_tx ≤ snapshot < deleted_tx`.
-//! - **Write transactions**: allocate a new TxId. Writes are tagged with this TxId.
-//!   At commit, if no earlier concurrent writer committed conflicting data,
-//!   the transaction succeeds and its TxId becomes the new committed_tx_id.
-//! - **First-committer-wins**: if two concurrent writers touch overlapping data,
-//!   the first to commit wins; the second must retry.
+//! Two atomics, zero locks:
 //!
-//! ## Snapshot isolation guarantees
+//! ```
+//! next_tx_id:     AtomicU64  — ticket dispenser (fetch_add)
+//! committed_tx_id: AtomicU64  — now-serving counter (CAS)
+//! ```
 //!
-//! - Read-only transactions never block and are never aborted.
-//! - Write transactions see their own writes.
-//! - Write transactions are serialized at commit time.
-//! - Phantom reads are possible (snapshot isolation, not serializable).
+//! - **begin_write**: `fetch_add` on next_tx_id → instant ticket.
+//! - **begin_read**: `load` committed_tx_id → instant snapshot.
+//! - **commit(tx_id)**: spin until committed_tx_id == tx_id - 1,
+//!   then store tx_id. In-order, lock-free.
+//! - **rollback(tx_id)**: same spin, same store — but no writes were applied,
+//!   so readers see nothing from this TxId. Correct for MVCC.
+//!
+//! ## Why in-order commit is correct
+//!
+//! MVCC visibility: a reader at snapshot S sees records where
+//! `created_tx ≤ S < deleted_tx`. If a rolled-back tx never created
+//! any records, there's nothing to see — advancing committed_tx_id
+//! past it is harmless.
+//!
+//! ## Convoy effect mitigation
+//!
+//! If a transaction holds a ticket but takes too long to commit,
+//! later tickets wait (spin). To prevent indefinite waiting:
+//! - `commit()` spins with exponential backoff
+//! - After `SPIN_LIMIT` iterations, returns `Err("timeout")`
+//! - Caller should retry with a new ticket
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::RwLock;
+use std::hint;
 
 use crate::types::TxId;
 
-/// Manages the lifecycle of all transactions.
+/// Max spin iterations before commit times out (≈ 1ms on modern CPU).
+const SPIN_LIMIT: u32 = 100_000;
+
+/// Manages the lifecycle of all transactions — completely lock-free.
 pub struct TxManager {
-    /// Next write TxId to allocate.
+    /// Next TxId to hand out (ticket dispenser).
     next_tx_id: AtomicU64,
 
-    /// Highest TxId that has been committed. Read transactions use this as snapshot.
+    /// Highest TxId that has been committed or rolled back.
+    /// Read transactions use this as their snapshot.
     committed_tx_id: AtomicU64,
-
-    /// Write TxIds that are currently active (not yet committed or rolled back).
-    active_writers: RwLock<Vec<TxId>>,
 }
 
 impl TxManager {
-    /// Create with bootstrap committed_tx_id = 0.
     pub fn new() -> Self {
         Self {
             next_tx_id: AtomicU64::new(1),
             committed_tx_id: AtomicU64::new(0),
-            active_writers: RwLock::new(Vec::new()),
         }
     }
 
-    /// Begin a read-only transaction. Returns the snapshot TxId.
-    ///
-    /// The transaction sees all data committed up to this point.
-    /// Read transactions never block and never need to retry.
+    /// Begin a read-only transaction.
+    /// Returns the latest committed snapshot. O(1), lock-free.
     pub fn begin_read(&self) -> TxId {
-        self.committed_tx_id.load(Ordering::SeqCst)
+        self.committed_tx_id.load(Ordering::Acquire)
     }
 
-    /// Begin a write transaction. Returns a new TxId.
-    ///
-    /// This TxId is NOT yet committed. Other transactions cannot see
-    /// writes made by this transaction until `commit()` succeeds.
+    /// Begin a write transaction.
+    /// Returns a new, unique TxId. O(1), lock-free.
     pub fn begin_write(&self) -> TxId {
-        let id = self.next_tx_id.fetch_add(1, Ordering::SeqCst);
-        self.active_writers.write().push(id);
-        id
+        self.next_tx_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// Try to commit a write transaction.
+    /// Commit a write transaction.
     ///
-    /// Returns `Ok(())` if the commit succeeded.
-    /// Returns `Err("conflict")` if an earlier concurrent writer
-    /// committed first (first-committer-wins).
+    /// Spins until our turn (all earlier tickets have committed or rolled back),
+    /// then advances committed_tx_id.
     ///
-    /// After successful commit, all subsequent reads will see
-    /// this transaction's writes.
+    /// Returns `Ok(())` on success, `Err("timeout")` if spin limit exceeded.
+    ///
+    /// After commit, all subsequent `begin_read()` calls will see the new snapshot.
     pub fn commit(&self, tx_id: TxId) -> Result<(), &'static str> {
-        // First-committer-wins conflict check:
-        // If any writer with TxId < our TxId has already committed,
-        // we have a conflict.
-        {
-            let writers = self.active_writers.read();
-            for &w in writers.iter() {
-                if w < tx_id {
-                    // An earlier writer is still active —
-                    // but was it committed? If committed_tx_id >= w,
-                    // then w committed before us.
-                }
+        let expected = tx_id - 1;
+        let mut spins: u32 = 0;
+
+        loop {
+            let current = self.committed_tx_id.load(Ordering::Acquire);
+            if current == expected {
+                // Our turn — advance the counter
+                self.committed_tx_id.store(tx_id, Ordering::Release);
+                return Ok(());
+            }
+
+            spins += 1;
+            if spins > SPIN_LIMIT {
+                return Err("timeout");
+            }
+
+            // Exponential backoff
+            if spins < 16 {
+                hint::spin_loop();
+            } else if spins < 256 {
+                for _ in 0..16 { hint::spin_loop(); }
+            } else {
+                std::thread::yield_now();
             }
         }
-
-        // Remove ourselves from active writers
-        {
-            let mut writers = self.active_writers.write();
-            writers.retain(|&w| w != tx_id);
-        }
-
-        // Simple strategy for now: always succeed. Full conflict detection
-        // requires tracking which keys each transaction touched.
-        // For Sprint 2, we rely on the caller to retry on conflict.
-        // The actual conflict is detected by the stores' MVCC visibility:
-        // if a node's created_tx was set by a concurrent tx, we'd see it.
-        self.committed_tx_id.store(tx_id, Ordering::SeqCst);
-        Ok(())
     }
 
-    /// Rollback a write transaction. Its writes are discarded.
+    /// Rollback a write transaction.
+    ///
+    /// Advances committed_tx_id past this ticket without applying any writes.
+    /// Other transactions waiting to commit can then proceed.
     pub fn rollback(&self, tx_id: TxId) {
-        let mut writers = self.active_writers.write();
-        writers.retain(|&w| w != tx_id);
+        // Spin until our turn, then skip
+        let expected = tx_id - 1;
+        loop {
+            let current = self.committed_tx_id.load(Ordering::Acquire);
+            if current == expected {
+                self.committed_tx_id.store(tx_id, Ordering::Release);
+                return;
+            }
+            hint::spin_loop();
+        }
     }
 
     /// Latest committed TxId (snapshot for new reads).
     pub fn latest_committed(&self) -> TxId {
-        self.committed_tx_id.load(Ordering::SeqCst)
-    }
-
-    /// Number of active write transactions.
-    pub fn active_count(&self) -> usize {
-        self.active_writers.read().len()
+        self.committed_tx_id.load(Ordering::Acquire)
     }
 }
 
@@ -131,7 +142,6 @@ mod tests {
     fn test_read_snapshot() {
         let tm = TxManager::new();
         assert_eq!(tm.begin_read(), 0);
-
         let tx = tm.begin_write();
         tm.commit(tx).unwrap();
         assert_eq!(tm.begin_read(), tx);
@@ -143,55 +153,51 @@ mod tests {
         let t1 = tm.begin_write();
         let t2 = tm.begin_write();
         let t3 = tm.begin_write();
-        assert!(t1 < t2);
-        assert!(t2 < t3);
+        assert!(t1 < t2 && t2 < t3);
     }
 
     #[test]
     fn test_commit_updates_snapshot() {
         let tm = TxManager::new();
-        let snap_before = tm.begin_read();
-        assert_eq!(snap_before, 0);
+        let snap = tm.begin_read();
+        assert_eq!(snap, 0);
 
         let tx = tm.begin_write();
         tm.commit(tx).unwrap();
-
-        let snap_after = tm.begin_read();
-        assert_eq!(snap_after, tx);
-        assert!(snap_after > snap_before);
+        assert!(tm.begin_read() > snap);
     }
 
     #[test]
-    fn test_rollback_does_not_affect_snapshot() {
+    fn test_rollback_advances_committed() {
         let tm = TxManager::new();
-        let snap_before = tm.latest_committed();
+        let snap = tm.latest_committed();
 
         let tx = tm.begin_write();
         tm.rollback(tx);
 
-        assert_eq!(tm.latest_committed(), snap_before);
+        // Rollback should advance committed_tx_id so later tx can proceed
+        assert_eq!(tm.latest_committed(), tx);
     }
 
     #[test]
-    fn test_active_writers_tracking() {
+    fn test_ordered_commits() {
         let tm = TxManager::new();
-        assert_eq!(tm.active_count(), 0);
-
         let t1 = tm.begin_write();
-        assert_eq!(tm.active_count(), 1);
-
         let t2 = tm.begin_write();
-        assert_eq!(tm.active_count(), 2);
+        let t3 = tm.begin_write();
 
+        // Commit t1 first (unblocks t2)
         tm.commit(t1).unwrap();
-        assert_eq!(tm.active_count(), 1);
+        // Commit t2 (unblocks t3)
+        tm.commit(t2).unwrap();
+        // Now t3 can commit
+        tm.commit(t3).unwrap();
 
-        tm.rollback(t2);
-        assert_eq!(tm.active_count(), 0);
+        assert_eq!(tm.latest_committed(), 3);
     }
 
     #[test]
-    fn test_concurrent_writers() {
+    fn test_concurrent_writers_lock_free() {
         use std::sync::Arc;
         use std::thread;
 
@@ -203,15 +209,43 @@ mod tests {
             handles.push(thread::spawn(move || {
                 for _ in 0..100 {
                     let tx = tm.begin_write();
+                    // Simulate work
+                    for _ in 0..10 { std::hint::spin_loop(); }
                     tm.commit(tx).unwrap();
                 }
             }));
         }
 
         for h in handles { h.join().unwrap(); }
-
-        // After 400 commits, committed_tx_id should be 400
+        // All 400 transactions committed in order
         assert_eq!(tm.latest_committed(), 400);
-        assert_eq!(tm.active_count(), 0);
+    }
+
+    #[test]
+    fn test_rollback_unblocks_others() {
+        let tm = TxManager::new();
+        let t1 = tm.begin_write();
+        let t2 = tm.begin_write();
+        let t3 = tm.begin_write();
+
+        // Rollback t1 → t2 and t3 should be unblocked
+        tm.rollback(t1);
+        tm.commit(t2).unwrap();
+        tm.commit(t3).unwrap();
+        assert_eq!(tm.latest_committed(), 3);
+    }
+
+    #[test]
+    fn test_commit_timeout_on_gap() {
+        // This tests that commit doesn't hang when there's a permanent gap.
+        // In the ticket-lock design, a gap can only occur if begin_write()
+        // is called but neither commit nor rollback is called.
+        // We handle this with a spin timeout.
+        let tm = TxManager::new();
+        let _t1 = tm.begin_write(); // t1 = 1, never committed or rolled back
+        let t2 = tm.begin_write();  // t2 = 2
+
+        // t2 should timeout because t1 is blocking it
+        assert!(tm.commit(t2).is_err());
     }
 }

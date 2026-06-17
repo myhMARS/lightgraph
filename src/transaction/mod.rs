@@ -26,10 +26,12 @@ use tx_manager::TxManager;
 /// tx.commit().unwrap(); // atomic across all stores
 /// ```
 pub struct Transaction<'a> {
-    /// Our write TxId (not yet committed).
+    /// Our write TxId (not yet committed). 0 for read-only.
     tx_id: TxId,
     /// Snapshot for reads within this transaction.
     snapshot: TxId,
+    /// Whether this is a write transaction (has a ticket).
+    is_write: bool,
     /// Reference to the global TxManager.
     tx_manager: &'a TxManager,
     /// Stores (shared references).
@@ -39,15 +41,10 @@ pub struct Transaction<'a> {
 
     // ── Write buffer ───────────────────────────────────────────
 
-    /// Buffered node inserts: (NodeId, labels, props_row)
     node_inserts: Mutex<Vec<(NodeId, Vec<LabelId>, u32)>>,
-    /// Buffered node deletes
     node_deletes: Mutex<Vec<NodeId>>,
-    /// Buffered edge inserts: (EdgeId, src, dst, etype, props_row)
     edge_inserts: Mutex<Vec<(EdgeId, NodeId, NodeId, LabelId, u32)>>,
-    /// Buffered edge deletes
     edge_deletes: Mutex<Vec<EdgeId>>,
-    /// Buffered property writes: (label, prop_name, row, value)
     prop_writes: Mutex<Vec<(LabelId, String, u32, Option<Value>)>>,
 }
 
@@ -55,18 +52,14 @@ impl<'a> Transaction<'a> {
     pub(crate) fn new(
         tx_id: TxId,
         snapshot: TxId,
+        is_write: bool,
         tx_manager: &'a TxManager,
         nodes: &'a NodeStore,
         edges: &'a EdgeStore,
         props: &'a PropStore,
     ) -> Self {
         Self {
-            tx_id,
-            snapshot,
-            tx_manager,
-            nodes,
-            edges,
-            props,
+            tx_id, snapshot, is_write, tx_manager, nodes, edges, props,
             node_inserts: Mutex::new(Vec::new()),
             node_deletes: Mutex::new(Vec::new()),
             edge_inserts: Mutex::new(Vec::new()),
@@ -128,10 +121,14 @@ impl<'a> Transaction<'a> {
 
     /// Atomically apply all buffered writes.
     ///
-    /// Order: nodes → edges → props (edges reference nodes).
-    /// On crash between any step, WAL replay recovers consistently.
+    /// Order: TxManager commit → stores → flush.
+    /// The ticket-lock ensures in-order visibility.
     pub fn commit(&self) -> Result<(), &'static str> {
-        // Phase 1: Try to commit at TxManager level
+        if !self.is_write {
+            return Ok(()); // read-only, nothing to commit
+        }
+
+        // Phase 1: Wait for our turn in the ticket-lock
         self.tx_manager.commit(self.tx_id)?;
 
         // Phase 2: Apply buffered writes to stores
@@ -151,7 +148,7 @@ impl<'a> Transaction<'a> {
             self.props.insert_prop(*label, prop, *row, value.clone());
         }
 
-        // Phase 3: Flush all stores to disk
+        // Phase 3: Flush all stores
         self.nodes.flush();
         self.edges.flush();
         self.props.flush();
@@ -159,17 +156,20 @@ impl<'a> Transaction<'a> {
         Ok(())
     }
 
-    /// Discard all buffered writes.
+    /// Discard all buffered writes and release our ticket.
     pub fn rollback(&self) {
-        self.tx_manager.rollback(self.tx_id);
-        // Buffers are simply dropped — no store changes were made.
+        if self.is_write {
+            self.tx_manager.rollback(self.tx_id);
+        }
     }
 }
 
 impl<'a> Drop for Transaction<'a> {
     fn drop(&mut self) {
-        // Auto-rollback if not committed
-        self.tx_manager.rollback(self.tx_id);
+        // Auto-rollback if write transaction not committed
+        if self.is_write {
+            self.tx_manager.rollback(self.tx_id);
+        }
     }
 }
 
@@ -204,18 +204,16 @@ impl Database {
         }
     }
 
-    /// Begin a read-only transaction.
-    /// The returned Transaction cannot commit (commit is a no-op, rollback is automatic).
+    /// Begin a read-only transaction. Does not acquire a ticket.
     pub fn begin_read(&self) -> Transaction {
         let snap = self.tx_manager.begin_read();
-        // Use snapshot as tx_id so rollback in Drop is harmless
-        Transaction::new(snap, snap, &self.tx_manager, &self.nodes, &self.edges, &self.props)
+        Transaction::new(0, snap, false, &self.tx_manager, &self.nodes, &self.edges, &self.props)
     }
 
-    /// Begin a write transaction.
+    /// Begin a write transaction. Acquires a ticket from TxManager.
     pub fn begin_write(&self) -> Transaction {
         let tx_id = self.tx_manager.begin_write();
         let snap = self.tx_manager.latest_committed();
-        Transaction::new(tx_id, snap, &self.tx_manager, &self.nodes, &self.edges, &self.props)
+        Transaction::new(tx_id, snap, true, &self.tx_manager, &self.nodes, &self.edges, &self.props)
     }
 }
