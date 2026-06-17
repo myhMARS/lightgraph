@@ -7,11 +7,12 @@
 pub mod node_store;
 pub mod edge_store;
 pub mod prop_store;
+pub mod store_log;
 
 use crate::types::{NodeId, EdgeId, LabelId, TypeId, TxId, NULL_EDGE, MAX_TX_ID};
 
 /// A Node in the graph.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Node {
     pub id: NodeId,
     pub labels: Vec<LabelId>,
