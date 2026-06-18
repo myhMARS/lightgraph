@@ -12,6 +12,7 @@ fn v(i: i64) -> Value { Value::Int(i) }
 
 // ── Helpers ──────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 fn median_us(data: &mut [f64]) -> f64 {
     data.sort_by(|a, b| a.partial_cmp(b).unwrap());
     data[data.len() / 2]
@@ -24,6 +25,7 @@ fn percentile(data: &mut [f64], p: f64) -> f64 {
 }
 
 /// Run a benchmark and report results.
+#[allow(dead_code)]
 fn run_bench(name: &str, threads: &[usize], mut f: impl FnMut(usize) -> (usize, Vec<f64>)) {
     println!("\n=== {} ===", name);
     println!("{:>12} {:>12} {:>12} {:>12} {:>12}",
@@ -263,7 +265,7 @@ fn bench_transaction_batch_size() {
         let start = Instant::now();
         for _ in 0..100 {
             let tx = db.begin_write();
-            for i in 0..batch {
+            for _i in 0..batch {
                 tx.create_node(vec![1], 0);
             }
             tx.commit().unwrap();

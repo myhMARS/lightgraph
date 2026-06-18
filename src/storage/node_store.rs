@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn test_alloc_reuse_after_hard_delete() {
         let store = mk_store();
-        let id0 = store.insert_node(vec![0], 0, 1);
+        let _id0 = store.insert_node(vec![0], 0, 1);
         let id1 = store.insert_node(vec![1], 1, 1);
         let _id2 = store.insert_node(vec![2], 2, 1);
         store.hard_delete(id1);

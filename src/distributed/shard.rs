@@ -3,6 +3,7 @@
 
 use crate::types::NodeId;
 
+#[allow(dead_code)]
 pub struct HashRing {
     virtual_nodes: usize,
     // Ring: sorted hash → shard_id mapping

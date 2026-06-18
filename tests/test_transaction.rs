@@ -30,7 +30,7 @@ fn test_create_node_with_properties() {
     let db = Database::memory();
 
     let tx = db.begin_write();
-    let id = tx.create_node(vec![0], 0);
+    let _id = tx.create_node(vec![0], 0);
     tx.set_prop(0, "name", 0, Some(s("Alice")));
     tx.set_prop(0, "age", 0, Some(v(30)));
     tx.commit().unwrap();
@@ -202,7 +202,7 @@ fn test_auto_rollback_on_drop() {
 
     {
         let tx = db.begin_write();
-        let id = tx.create_node(vec![0], 0);
+        let _id = tx.create_node(vec![0], 0);
         // tx dropped without commit → auto rollback
     }
 

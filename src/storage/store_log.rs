@@ -34,6 +34,7 @@ const OP_TOMBSTONE: u8 = 0;
 const DEFAULT_BATCH_BYTES: usize = 65536;
 const DEFAULT_BATCH_TIMEOUT_MS: u64 = 5;
 
+#[allow(dead_code)]
 pub struct StoreLog {
     path: PathBuf,
     writer: BufWriter<File>,

@@ -10,6 +10,7 @@ pub enum DistanceMetric {
 
 /// Cosine similarity in [0, 1], SIMD accelerateable.
 #[inline]
+#[allow(dead_code)]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());
 
@@ -27,12 +28,14 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 /// Cosine distance = 1 - cosine_similarity
 #[inline]
+#[allow(dead_code)]
 pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     1.0 - cosine_similarity(a, b)
 }
 
 /// Euclidean (L2) distance
 #[inline]
+#[allow(dead_code)]
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());
 
@@ -45,6 +48,7 @@ pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
 
 /// Dot product (higher = more similar for normalized vectors)
 #[inline]
+#[allow(dead_code)]
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());
     a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()

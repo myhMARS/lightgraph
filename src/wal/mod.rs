@@ -44,6 +44,7 @@ pub struct WalWriter {
     fsync_interval: std::time::Duration,
 }
 
+#[allow(dead_code)]
 pub struct WalReader {
     file: fs::File,
 }

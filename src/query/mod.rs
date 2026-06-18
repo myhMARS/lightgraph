@@ -18,7 +18,6 @@ use crate::types::{NodeId, Score};
 use crate::index::fulltext::FullTextIndex;
 use crate::index::vector::VectorIndex;
 use crate::index::property::{Predicate, PropertyIndex};
-use roaring::RoaringBitmap;
 use std::collections::HashMap;
 
 /// Result from a hybrid query
@@ -88,13 +87,13 @@ pub fn hybrid_search(
         for &node_id in &candidates {
             let mut score = 0.0;
 
-            if let Some(ref ft) = ctx.ft_index {
+            if let Some(ref _ft) = ctx.ft_index {
                 if let Some(q) = fulltext_query {
                     let _ = q; // TODO: single-doc scoring
                     score += alpha * 1.0;
                 }
             }
-            if let Some(ref vi) = ctx.vec_index {
+            if let Some(ref _vi) = ctx.vec_index {
                 if let Some(vq) = vector_query {
                     let _ = vq;
                     score += beta * 1.0; // TODO: single-doc vector score

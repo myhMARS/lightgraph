@@ -13,6 +13,7 @@ pub use hnsw::HnswIndex;
 use crate::types::{NodeId, Score};
 
 /// A vector index implementation
+#[allow(dead_code)]
 pub struct VectorIndex {
     name: String,
     dim: usize,

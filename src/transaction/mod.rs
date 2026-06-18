@@ -205,13 +205,13 @@ impl Database {
     }
 
     /// Begin a read-only transaction. Does not acquire a ticket.
-    pub fn begin_read(&self) -> Transaction {
+    pub fn begin_read(&self) -> Transaction<'_> {
         let snap = self.tx_manager.begin_read();
         Transaction::new(0, snap, false, &self.tx_manager, &self.nodes, &self.edges, &self.props)
     }
 
     /// Begin a write transaction. Acquires a ticket from TxManager.
-    pub fn begin_write(&self) -> Transaction {
+    pub fn begin_write(&self) -> Transaction<'_> {
         let tx_id = self.tx_manager.begin_write();
         let snap = self.tx_manager.latest_committed();
         Transaction::new(tx_id, snap, true, &self.tx_manager, &self.nodes, &self.edges, &self.props)

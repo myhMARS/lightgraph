@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn test_rollback_advances_committed() {
         let tm = TxManager::new();
-        let snap = tm.latest_committed();
+        let _snap = tm.latest_committed();
 
         let tx = tm.begin_write();
         tm.rollback(tx);

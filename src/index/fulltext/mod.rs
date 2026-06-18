@@ -59,7 +59,7 @@ impl FullTextIndex {
 
     pub fn search(&self, query: &str) -> Vec<(NodeId, Score)> {
         let tokens = CjkAnalyzer::tokenize(query);
-        let mut results: DashMap<NodeId, Score> = DashMap::new();
+        let results: DashMap<NodeId, Score> = DashMap::new();
 
         if let Some(ref fst) = self.fst {
             for token in &tokens {

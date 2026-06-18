@@ -7,8 +7,11 @@
 use crate::types::{NodeId, Score};
 
 pub struct HnswIndex {
+    #[allow(dead_code)]
     dim: usize,
+    #[allow(dead_code)]
     m: usize,
+    #[allow(dead_code)]
     ef_construction: usize,
 }
 

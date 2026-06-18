@@ -148,7 +148,7 @@ fn bench_edges_concurrent_write() {
             let mut handles = Vec::new();
             let start = Instant::now();
             let n = (total / threads as u64) as usize;
-            for t in 0..threads {
+            for _t in 0..threads {
                 let s = Arc::clone(&store);
                 let b = Arc::clone(&barrier);
                 handles.push(thread::spawn(move || {

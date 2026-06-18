@@ -14,7 +14,6 @@ use ordered_float::OrderedFloat;
 use roaring::RoaringBitmap;
 
 use crate::storage::prop_store::Value;
-use crate::types::NodeId;
 
 pub type LabelProp = (String, String); // (label, property_name)
 

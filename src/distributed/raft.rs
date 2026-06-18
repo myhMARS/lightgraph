@@ -2,6 +2,7 @@
 // Phases: Leader Election → Log Replication → State Machine Apply.
 // Sprint 11-12.
 
+#[allow(dead_code)]
 pub struct RaftNode {
     node_id: u64,
     // TODO: Raft state machine, term, log entries, commit index

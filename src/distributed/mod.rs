@@ -12,8 +12,6 @@ pub use raft::RaftNode;
 pub use shard::HashRing;
 pub use router::ShardRouter;
 
-use crate::types::NodeId;
-
 /// Configuration for a cluster node.
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
