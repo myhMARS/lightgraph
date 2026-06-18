@@ -139,6 +139,9 @@ impl<'a> Transaction<'a> {
         if !self.is_write {
             return Ok(()); // read-only, nothing to commit
         }
+        if self.committed.get() {
+            return Err("already committed or rolled back");
+        }
 
         // Phase 1: Wait for our turn in the ticket-lock
         self.tx_manager.commit(self.tx_id)?;
@@ -149,7 +152,7 @@ impl<'a> Transaction<'a> {
             self.nodes.insert_with_id(*id, labels.clone(), *props_row, self.tx_id);
         }
         for (id, labels) in self.node_updates.lock().iter() {
-            self.nodes.update_labels(*id, labels.clone());
+            self.nodes.update_labels(*id, labels.clone(), self.tx_id);
         }
         for id in self.node_deletes.lock().iter() {
             self.nodes.soft_delete(*id, self.tx_id);

@@ -34,7 +34,7 @@ fn test_create_read_update_delete_lifecycle() {
     drop(node);
 
     // Update
-    assert!(store.update_labels(id, vec![20, 30]));
+    assert!(store.update_labels(id, vec![20, 30], 2));
     let node = store.get(id).unwrap();
     assert_eq!(node.labels, vec![20, 30]);
     drop(node);
@@ -66,7 +66,7 @@ fn test_snapshot_isolation_across_timeline() {
     let n1 = store.insert_node(vec![1], 1, 1);
 
     // Transaction 2 updates n0
-    store.update_labels(n0, vec![99]);
+    store.update_labels(n0, vec![99], 2);
 
     // Transaction 3 deletes n1
     store.soft_delete(n1, 3);
@@ -74,15 +74,17 @@ fn test_snapshot_isolation_across_timeline() {
     // Transaction 4 creates n2
     let n2 = store.insert_node(vec![2], 2, 4);
 
-    // Snapshot at tx=1 sees n0,n1 only
+    // Snapshot at tx=1 sees n1 only (n0 was updated at tx=2, now invisible at tx=1)
     let snap1 = store.visible_nodes(1);
-    assert_eq!(snap1.len(), 2);
-    assert!(snap1.contains(&n0));
+    assert_eq!(snap1.len(), 1);
+    assert!(!snap1.contains(&n0)); // n0 created_tx was bumped to 2 by update_labels
     assert!(snap1.contains(&n1));
 
     // Snapshot at tx=2 sees n0(updated), n1
     let snap2 = store.visible_nodes(2);
     assert_eq!(snap2.len(), 2);
+    assert!(snap2.contains(&n0));
+    assert!(snap2.contains(&n1));
 
     // Snapshot at tx=4 sees n0(updated), n2 (n1 was deleted at tx 3)
     let snap4 = store.visible_nodes(4);

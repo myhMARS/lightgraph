@@ -185,10 +185,11 @@ impl NodeStore {
         self.nodes.get_mut(&id)
     }
 
-    pub fn update_labels(&self, id: NodeId, labels: Vec<LabelId>) -> bool {
+    pub fn update_labels(&self, id: NodeId, labels: Vec<LabelId>, tx_id: TxId) -> bool {
         match self.nodes.get_mut(&id) {
             Some(mut node) => {
                 node.labels = labels;
+                node.created_tx = tx_id; // MVCC: new version visible only at >= tx_id
                 // Re-serialize full node to WAL
                 if let Some(ref wal) = self.wal {
                     if let Ok(data) = bincode::serialize(&*node) {
@@ -375,7 +376,7 @@ mod tests {
         {
             let store = NodeStore::open(path, Consistency::immediate()).unwrap();
             let id = store.insert_node(vec![0], 0, 1);
-            store.update_labels(id, vec![99]);
+            store.update_labels(id, vec![99], 2);
             store.update_props_row(id, 55);
             store.set_first_out(id, 12345);
             store.flush();
@@ -555,7 +556,7 @@ mod tests {
         // with_capacity creates a store without WAL — operations should not panic
         let id = store.insert_node(vec![0], 0, 1);
         assert!(store.contains(id));
-        store.update_labels(id, vec![1, 2]);
+        store.update_labels(id, vec![1, 2], 2);
         store.update_props_row(id, 42);
         store.set_first_out(id, 100);
         store.set_first_in(id, 200);
