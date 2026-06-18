@@ -19,9 +19,8 @@
 //! - In-memory mode: if no path given, no WAL thread.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
@@ -506,7 +505,7 @@ mod tests {
     fn test_visible_count_respects_mvcc() {
         let store = mk_store();
         let n0 = store.insert_node(vec![0], 0, 1);
-        let n1 = store.insert_node(vec![1], 1, 3);
+        let _n1 = store.insert_node(vec![1], 1, 3);
         let _n2 = store.insert_node(vec![2], 2, 5);
         store.soft_delete(n0, 10);
         // tx=4: n0 visible (created 1, deleted 10), n1 visible (created 3, no delete)

@@ -8,7 +8,6 @@
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;

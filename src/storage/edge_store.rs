@@ -6,7 +6,6 @@
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
