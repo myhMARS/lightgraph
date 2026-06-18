@@ -10,32 +10,48 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test-rust:
+  build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        crate: [storage, index, query, transaction, wal, snapshot]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --lib ${{ matrix.crate }}
+      - run: cargo build --verbose
 
-  test-python:
+  clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - run: pip install maturin pytest
-      - run: cd python && maturin develop
-      - run: pytest tests/ -v
+          components: clippy
+      - run: cargo clippy --all-targets -- -D warnings
 
-  bench:
+  test:
     runs-on: ubuntu-latest
-    needs: [test-rust]
+    needs: [build]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo bench --no-run
+      - run: cargo test --all-targets
+
+  # Python tests — enabled when pyo3/python/ directory is ready (Sprint 15)
+  # test-python:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - uses: actions/setup-python@v5
+  #       with:
+  #         python-version: "3.11"
+  #     - run: pip install maturin pytest
+  #     - run: cd python && maturin develop
+  #     - run: pytest tests/ -v
+
+  # Benchmarks — enabled in Sprint 14
+  # bench-compile:
+  #   runs-on: ubuntu-latest
+  #   needs: [test]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - run: cargo bench --no-run

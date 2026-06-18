@@ -468,4 +468,105 @@ mod tests {
         for h in hs { h.join().unwrap(); }
         assert_eq!(store.len(), 8000);
     }
+
+    // ── Two-step insert (for transaction layer) ──────────────────────
+
+    #[test]
+    fn test_alloc_id_direct_and_insert_with_id() {
+        let store = mk_store();
+        // Step 1: allocate ID (e.g. during transaction buffering)
+        let id = store.alloc_id_direct();
+        assert_eq!(id, 0);
+        // Step 2: insert with pre-allocated ID (on commit)
+        store.insert_with_id(id, vec![10], 99, 5);
+        let n = store.get(id).unwrap();
+        assert_eq!(n.labels, vec![10]);
+        assert_eq!(n.props_row, 99);
+        assert_eq!(n.created_tx, 5);
+        assert!(store.contains(id));
+    }
+
+    #[test]
+    fn test_alloc_id_direct_reuses_freed_ids() {
+        let store = mk_store();
+        let a = store.insert_node(vec![0], 0, 1);
+        let b = store.insert_node(vec![0], 0, 1);
+        store.hard_delete(a);
+        store.hard_delete(b);
+        // alloc_id_direct should recycle a's ID
+        let recycled = store.alloc_id_direct();
+        assert_eq!(recycled, a);
+        store.insert_with_id(recycled, vec![1], 0, 2);
+        assert!(store.contains(recycled));
+    }
+
+    // ── visible_count ────────────────────────────────────────────────
+
+    #[test]
+    fn test_visible_count_respects_mvcc() {
+        let store = mk_store();
+        let n0 = store.insert_node(vec![0], 0, 1);
+        let n1 = store.insert_node(vec![1], 1, 3);
+        let _n2 = store.insert_node(vec![2], 2, 5);
+        store.soft_delete(n0, 10);
+        // tx=4: n0 visible (created 1, deleted 10), n1 visible (created 3, no delete)
+        // n2 not visible (created 5 > 4)
+        assert_eq!(store.visible_count(4), 2);
+        // tx=6: n0 visible, n1 visible, n2 visible (created 5)
+        assert_eq!(store.visible_count(6), 3);
+        // tx=10: n0 dead (deleted at 10), n1 + n2 visible
+        assert_eq!(store.visible_count(10), 2);
+        // tx=u64::MAX-1: same as tx=10 since deleted_tx for alive nodes is MAX_TX_ID (=u64::MAX)
+        assert_eq!(store.visible_count(MAX_TX_ID - 1), 2);
+    }
+
+    // ── Stats ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_stats_accuracy() {
+        let store = mk_store();
+        assert_eq!(store.total_ever(), 0);
+        assert_eq!(store.len(), 0);
+        assert_eq!(store.next_fresh_id(), 0);
+        assert_eq!(store.free_count(), 0);
+
+        let id0 = store.insert_node(vec![0], 0, 1);
+        assert_eq!(store.total_ever(), 1);
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.next_fresh_id(), 1);
+
+        store.insert_node(vec![0], 0, 1);
+        assert_eq!(store.total_ever(), 2);
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.next_fresh_id(), 2);
+
+        store.hard_delete(id0);
+        assert_eq!(store.total_ever(), 2); // total_ever never decreases
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.free_count(), 1);
+        // next_fresh_id still 2 — freed IDs don't advance it
+        assert_eq!(store.next_fresh_id(), 2);
+    }
+
+    // ── In-memory mode (no WAL) ────────────────────────────────────
+
+    #[test]
+    fn test_in_memory_mode_no_wal() {
+        let store = mk_store();
+        // with_capacity creates a store without WAL — operations should not panic
+        let id = store.insert_node(vec![0], 0, 1);
+        assert!(store.contains(id));
+        store.update_labels(id, vec![1, 2]);
+        store.update_props_row(id, 42);
+        store.set_first_out(id, 100);
+        store.set_first_in(id, 200);
+        store.soft_delete(id, 10);
+        assert!(!store.get(id).unwrap().is_alive(10));
+        store.hard_delete(id);
+        assert!(!store.contains(id));
+        // flush is a no-op without WAL — must not panic
+        store.flush();
+        // stats still work
+        assert_eq!(store.pending_wal_bytes(), 0);
+    }
 }

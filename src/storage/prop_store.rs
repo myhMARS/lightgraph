@@ -140,11 +140,14 @@ impl PropStore {
 
     pub fn insert_prop(&self, label: LabelId, prop: &str, row: u32, value: Option<Value>) -> u32 {
         let key = (label, prop.to_string());
-        let mut col = self.columns.entry(key).or_insert_with(|| RwLock::new(PropertyColumn::new()));
-        let mut col = col.write();
-        col.extend_to(row as usize + 1);
-        col.set(row, value);
-        drop(col);
+        // Scope the DashMap RefMut so it's dropped before wal_send_column,
+        // which also needs to access the DashMap (avoiding a shard-lock deadlock).
+        {
+            let col = self.columns.entry(key).or_insert_with(|| RwLock::new(PropertyColumn::new()));
+            let mut col = col.write();
+            col.extend_to(row as usize + 1);
+            col.set(row, value);
+        }
         self.wal_send_column(label, prop);
         row
     }

@@ -48,14 +48,15 @@ lto = true
 codegen-units = 1
 opt-level = 3
 
-[[bench]]
-name = "bench_storage"
-harness = false
-
-[[bench]]
-name = "bench_hybrid"
-harness = false
-
-[[bench]]
-name = "bench_index"
-harness = false
+# [[bench]] — enabled in Sprint 14 when benches are implemented
+# [[bench]]
+# name = "bench_storage"
+# harness = false
+#
+# [[bench]]
+# name = "bench_hybrid"
+# harness = false
+#
+# [[bench]]
+# name = "bench_index"
+# harness = false
