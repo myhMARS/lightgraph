@@ -5,6 +5,7 @@
 
 pub mod tx_manager;
 
+use std::cell::Cell;
 use parking_lot::Mutex;
 
 use crate::types::{NodeId, EdgeId, LabelId, TxId};
@@ -32,6 +33,8 @@ pub struct Transaction<'a> {
     snapshot: TxId,
     /// Whether this is a write transaction (has a ticket).
     is_write: bool,
+    /// Whether this transaction has been committed.
+    committed: Cell<bool>,
     /// Reference to the global TxManager.
     tx_manager: &'a TxManager,
     /// Stores (shared references).
@@ -42,6 +45,7 @@ pub struct Transaction<'a> {
     // ── Write buffer ───────────────────────────────────────────
 
     node_inserts: Mutex<Vec<(NodeId, Vec<LabelId>, u32)>>,
+    node_updates: Mutex<Vec<(NodeId, Vec<LabelId>)>>,
     node_deletes: Mutex<Vec<NodeId>>,
     edge_inserts: Mutex<Vec<(EdgeId, NodeId, NodeId, LabelId, u32)>>,
     edge_deletes: Mutex<Vec<EdgeId>>,
@@ -59,8 +63,11 @@ impl<'a> Transaction<'a> {
         props: &'a PropStore,
     ) -> Self {
         Self {
-            tx_id, snapshot, is_write, tx_manager, nodes, edges, props,
+            tx_id, snapshot, is_write,
+            committed: Cell::new(false),
+            tx_manager, nodes, edges, props,
             node_inserts: Mutex::new(Vec::new()),
+            node_updates: Mutex::new(Vec::new()),
             node_deletes: Mutex::new(Vec::new()),
             edge_inserts: Mutex::new(Vec::new()),
             edge_deletes: Mutex::new(Vec::new()),
@@ -81,6 +88,11 @@ impl<'a> Transaction<'a> {
         let id = self.nodes.alloc_id_direct();
         self.node_inserts.lock().push((id, labels, props_row));
         id
+    }
+
+    /// Update node labels. Applied on commit.
+    pub fn update_node_labels(&self, id: NodeId, labels: Vec<LabelId>) {
+        self.node_updates.lock().push((id, labels));
     }
 
     /// Delete a node. Applied on commit.
@@ -130,10 +142,14 @@ impl<'a> Transaction<'a> {
 
         // Phase 1: Wait for our turn in the ticket-lock
         self.tx_manager.commit(self.tx_id)?;
+        self.committed.set(true);
 
         // Phase 2: Apply buffered writes to stores
         for (id, labels, props_row) in self.node_inserts.lock().iter() {
             self.nodes.insert_with_id(*id, labels.clone(), *props_row, self.tx_id);
+        }
+        for (id, labels) in self.node_updates.lock().iter() {
+            self.nodes.update_labels(*id, labels.clone());
         }
         for id in self.node_deletes.lock().iter() {
             self.nodes.soft_delete(*id, self.tx_id);
@@ -160,14 +176,15 @@ impl<'a> Transaction<'a> {
     pub fn rollback(&self) {
         if self.is_write {
             self.tx_manager.rollback(self.tx_id);
+            self.committed.set(true); // prevent Drop from double-rollback
         }
     }
 }
 
 impl<'a> Drop for Transaction<'a> {
     fn drop(&mut self) {
-        // Auto-rollback if write transaction not committed
-        if self.is_write {
+        // Auto-rollback only if write transaction was never committed
+        if self.is_write && !self.committed.get() {
             self.tx_manager.rollback(self.tx_id);
         }
     }
@@ -194,12 +211,12 @@ impl Database {
         })
     }
 
-    /// Create an in-memory database (for testing).
+    /// Create an in-memory database with small capacity (for testing).
     pub fn memory() -> Self {
         Self {
             tx_manager: TxManager::new(),
-            nodes: NodeStore::new(),
-            edges: EdgeStore::new(),
+            nodes: NodeStore::with_capacity(1024),
+            edges: EdgeStore::with_capacity(1024),
             props: PropStore::new(),
         }
     }
