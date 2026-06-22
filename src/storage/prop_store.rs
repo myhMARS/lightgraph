@@ -92,17 +92,25 @@ impl PropStore {
 
         if wal_path.exists() && std::fs::metadata(&wal_path)?.len() > 4 {
             super::wal_thread::replay_wal(&wal_path, |opcode, _id, payload| {
-                if opcode == 1 && payload.len() >= 6 {
+                if opcode == 1 && payload.len() >= 10 {
                     let label = u32::from_le_bytes(payload[..4].try_into().unwrap());
                     let name_len = payload[4] as usize;
-                    if payload.len() < 5 + name_len { return; }
-                    let prop_name = String::from_utf8_lossy(&payload[5..5+name_len]).to_string();
-                    let val_data = &payload[5+name_len..];
-                    if let Ok(values) = bincode::deserialize::<Vec<Option<Value>>>(val_data) {
-                        let len = values.len() as u32;
-                        store.columns.insert((label, prop_name), RwLock::new(PropertyColumn { values }));
+                    let header_end = 5 + name_len;
+                    if payload.len() < header_end + 4 { return; }
+                    let prop_name = String::from_utf8_lossy(&payload[5..header_end]).to_string();
+                    let row = u32::from_le_bytes(payload[header_end..header_end+4].try_into().unwrap());
+                    let val_data = &payload[header_end+4..];
+                    if let Ok(value) = bincode::deserialize::<Option<Value>>(val_data) {
+                        let key = (label, prop_name);
+                        let col_ref = store.columns.entry(key)
+                            .or_insert_with(|| RwLock::new(PropertyColumn::new()));
+                        let mut col = col_ref.write();
+                        col.extend_to(row as usize + 1);
+                        col.set(row, value);
+                        drop(col);
+                        drop(col_ref);
                         store.schemas.entry(label).or_insert_with(LabelSchema::new)
-                            .next_row.fetch_max(len, Ordering::SeqCst);
+                            .next_row.fetch_max(row + 1, Ordering::SeqCst);
                     }
                 }
             })?;
@@ -113,19 +121,17 @@ impl PropStore {
         Ok(store)
     }
 
-    /// Serialize and send a column to the WAL thread.
-    fn wal_send_column(&self, label: LabelId, prop_name: &str) {
+    /// Send an incremental cell update to the WAL thread (row-level delta, not full column).
+    fn wal_send_cell(&self, label: LabelId, prop_name: &str, row: u32, value: &Option<Value>) {
         if let Some(ref wal) = self.wal {
-            if let Some(col) = self.columns.get(&(label, prop_name.to_string())) {
-                let col = col.read();
-                let mut payload: Vec<u8> = Vec::new();
-                payload.extend_from_slice(&label.to_le_bytes());
-                payload.push(prop_name.len() as u8);
-                payload.extend_from_slice(prop_name.as_bytes());
-                if let Ok(val_data) = bincode::serialize(&col.values) {
-                    payload.extend_from_slice(&val_data);
-                    wal.send_insert(label as u64, payload);
-                }
+            let mut payload: Vec<u8> = Vec::new();
+            payload.extend_from_slice(&label.to_le_bytes());
+            payload.push(prop_name.len() as u8);
+            payload.extend_from_slice(prop_name.as_bytes());
+            payload.extend_from_slice(&row.to_le_bytes());
+            if let Ok(val_data) = bincode::serialize(value) {
+                payload.extend_from_slice(&val_data);
+                wal.send_insert(label as u64, payload);
             }
         }
     }
@@ -139,7 +145,8 @@ impl PropStore {
 
     pub fn insert_prop(&self, label: LabelId, prop: &str, row: u32, value: Option<Value>) -> u32 {
         let key = (label, prop.to_string());
-        // Scope the DashMap RefMut so it's dropped before wal_send_column,
+        let wal_value = value.clone(); // clone before move for WAL
+        // Scope the DashMap RefMut so it's dropped before wal_send_cell,
         // which also needs to access the DashMap (avoiding a shard-lock deadlock).
         {
             let col = self.columns.entry(key).or_insert_with(|| RwLock::new(PropertyColumn::new()));
@@ -147,7 +154,7 @@ impl PropStore {
             col.extend_to(row as usize + 1);
             col.set(row, value);
         }
-        self.wal_send_column(label, prop);
+        self.wal_send_cell(label, prop, row, &wal_value);
         row
     }
 
@@ -158,10 +165,10 @@ impl PropStore {
 
     pub fn set_prop(&self, label: LabelId, prop: &str, row: u32, value: Option<Value>) -> bool {
         let ok = match self.columns.get(&(label, prop.to_string())) {
-            Some(col) => col.write().set(row, value),
+            Some(col) => col.write().set(row, value.clone()),
             None => false,
         };
-        if ok { self.wal_send_column(label, prop); }
+        if ok { self.wal_send_cell(label, prop, row, &value); }
         ok
     }
 
