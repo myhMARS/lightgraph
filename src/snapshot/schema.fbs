@@ -1,0 +1,71 @@
+// LightGraph Snapshot Schema — FlatBuffers format for zero-copy recovery.
+// Sprint 4
+//
+// Compile with: flatc --rust schema.fbs
+
+namespace lightgraph.snapshot;
+
+// ── Primitives ────────────────────────────────────────────────
+
+/// Property value (mirrors prop_store::Value)
+table PropertyValue {
+    type: u8;  // 0=null, 1=bool, 2=int, 3=float, 4=string, 5=list, 6=vector
+    int_val: long;
+    float_val: float;
+    string_val: string;
+    list_vals: [long];  // flattened representation
+    vec_f32: [float];
+}
+
+/// Key-value property pair
+table Property {
+    name: string;
+    value: PropertyValue;
+}
+
+// ── Graph entities ─────────────────────────────────────────────
+
+/// A node in the graph
+table NodeSnapshot {
+    id: ulong;
+    labels: [uint];
+    first_out: ulong;
+    first_in: ulong;
+    props: [Property];       // columnar props for this node's label
+    created_tx: ulong;
+    deleted_tx: ulong;
+}
+
+/// A directed edge
+table EdgeSnapshot {
+    id: ulong;
+    src: ulong;
+    dst: ulong;
+    etype: uint;
+    next_out: ulong;
+    next_in: ulong;
+    props: [Property];
+    created_tx: ulong;
+    deleted_tx: ulong;
+}
+
+// ── Snapshot header ────────────────────────────────────────────
+
+/// Snapshot metadata
+table SnapshotHeader {
+    version: uint;           // schema version
+    snapshot_id: ulong;
+    created_at: ulong;       // Unix timestamp
+    node_count: uint;
+    edge_count: uint;
+    wal_bytes_since: ulong;  // WAL bytes since last snapshot
+}
+
+/// Top-level snapshot container
+table Snapshot {
+    header: SnapshotHeader;
+    nodes: [NodeSnapshot];
+    edges: [EdgeSnapshot];
+}
+
+root_type Snapshot;
