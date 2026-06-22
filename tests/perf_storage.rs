@@ -255,8 +255,6 @@ fn perf_wal_large_table_insert_latency() {
 
     let store = PropStore::open(path, Consistency::balanced()).unwrap();
 
-    // Pre-fill: create a column with initial rows
-    let prefill = 0u32;
     // Insert 1000 rows, measure latency every 100 rows
     let total = 1000u32;
     let interval = 100;
