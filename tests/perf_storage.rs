@@ -258,23 +258,22 @@ fn perf_wal_large_table_insert_latency() {
     // Insert 1000 rows, measure latency every 100 rows
     let total = 1000u32;
     let interval = 100;
-    println!("\n  Row | Latency(us) | Column size(bytes)");
-    println!("  ----|-------------|-------------------");
+    println!("\n  Row | Batch avg(ns) | WAL record(bytes)");
+    println!("  ----|---------------|------------------");
 
+    let mut row: u32 = 0;
     let start = Instant::now();
-    for i in 1..=total {
+    while row < total {
+        let batch_size = interval.min(total - row);
         let t0 = Instant::now();
-        store.insert_row(0, &[("v".into(), Value::Int(i as i64))]);
-        let us = t0.elapsed().as_micros();
-
-        if i % interval == 0 || i == 1 {
-            // Estimate column size
-            let col_size = if let Some(col) = store.get_prop(0, "v", 0) {
-                bincode::serialize(&col).map(|d| d.len()).unwrap_or(0)
-            } else { 0 };
-            // Column has i rows
-            println!("  {:>4} | {:>11} | {:>18}", i, us, col_size);
+        for _ in 0..batch_size {
+            row += 1;
+            store.insert_row(0, &[("v".into(), Value::Int(row as i64))]);
         }
+        let avg_ns = t0.elapsed().as_nanos() / batch_size as u128;
+        let wal_size = bincode::serialize(&Value::Int(row as i64))
+            .map(|d| d.len()).unwrap_or(0);
+        println!("  {:>4} | {:>13} | {:>17}", row, avg_ns, wal_size);
     }
     store.flush();
     let ms = elapsed_ms(start);
