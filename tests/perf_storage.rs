@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use lightgraph::storage::node_store::NodeStore;
 use lightgraph::storage::edge_store::EdgeStore;
-use lightgraph::storage::prop_store::PropStore;
+use lightgraph::storage::prop_store::{PropStore, Value};
 use lightgraph::transaction::Database;
 
 fn elapsed_ms(start: Instant) -> f64 {
@@ -238,4 +238,85 @@ fn perf_wal_write_batched() {
     let ms = elapsed_ms(start);
     let ops_per_sec = n as f64 / (ms / 1000.0);
     println!("WAL write (batched 5ms/64KB):  {:.0} ops/s ({:.1} ms for {} writes)", ops_per_sec, ms, n);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Large table WAL benchmark — incremental vs full-column
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn perf_wal_large_table_insert_latency() {
+    use tempfile::TempDir;
+    use lightgraph::storage::consistency::Consistency;
+    use lightgraph::storage::prop_store::PropStore;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path();
+
+    let store = PropStore::open(path, Consistency::balanced()).unwrap();
+
+    // Pre-fill: create a column with initial rows
+    let prefill = 0u32;
+    // Insert 1000 rows, measure latency every 100 rows
+    let total = 1000u32;
+    let interval = 100;
+    println!("\n  Row | Latency(us) | Column size(bytes)");
+    println!("  ----|-------------|-------------------");
+
+    let start = Instant::now();
+    for i in 1..=total {
+        let t0 = Instant::now();
+        store.insert_row(0, &[("v".into(), Value::Int(i as i64))]);
+        let us = t0.elapsed().as_micros();
+
+        if i % interval == 0 || i == 1 {
+            // Estimate column size
+            let col_size = if let Some(col) = store.get_prop(0, "v", 0) {
+                bincode::serialize(&col).map(|d| d.len()).unwrap_or(0)
+            } else { 0 };
+            // Column has i rows
+            println!("  {:>4} | {:>11} | {:>18}", i, us, col_size);
+        }
+    }
+    store.flush();
+    let ms = elapsed_ms(start);
+    let ops_per_sec = total as f64 / (ms / 1000.0);
+    println!("\n  Total: {:.0} ops/s ({:.1} ms for {} inserts)", ops_per_sec, ms, total);
+    println!("  Avg latency: {:.1} us/op", (ms * 1000.0) / total as f64);
+    assert_eq!(store.row_count(0), total);
+}
+
+#[test]
+fn perf_wal_large_vs_inmemory() {
+    use tempfile::TempDir;
+    use lightgraph::storage::consistency::Consistency;
+    use lightgraph::storage::prop_store::PropStore;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path();
+
+    // Mode 1: In-memory (no WAL)
+    {
+        let store = PropStore::new();
+        let n = 100_000u32;
+        let start = Instant::now();
+        for i in 0..n {
+            store.insert_row(0, &[("v".into(), Value::Int(i as i64))]);
+        }
+        let ms = elapsed_ms(start);
+        println!("  In-memory (no WAL):    {:>8.0} ops/s  ({:.1} ms for {} rows)", n as f64 / (ms/1000.0), ms, n);
+    }
+
+    // Mode 2: WAL persistence (balanced)
+    {
+        let store = PropStore::open(path, Consistency::balanced()).unwrap();
+        let n = 100_000u32;
+        let start = Instant::now();
+        for i in 0..n {
+            store.insert_row(0, &[("v".into(), Value::Int(i as i64))]);
+        }
+        store.flush();
+        let ms = elapsed_ms(start);
+        println!("  WAL balanced (5ms/64KB): {:>8.0} ops/s  ({:.1} ms for {} rows)", n as f64 / (ms/1000.0), ms, n);
+    }
 }

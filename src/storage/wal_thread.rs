@@ -105,17 +105,23 @@ impl WalThread {
         })
     }
 
-    /// Send an insert command. Non-blocking if channel has capacity.
+    /// Send an insert command. Blocks if channel is full (backpressure).
+    /// Guarantees the record is delivered to the WAL thread.
     pub fn send_insert(&self, id: u64, record: Vec<u8>) {
         self.pending_bytes.fetch_add(record.len() as u64 + 9, Ordering::Relaxed);
-        // Ignore send error: WAL thread is shutting down
-        let _ = self.tx.try_send(WalCmd::Insert(id, record));
+        // Blocking send: backpressure instead of silent data loss.
+        // Only fails if the channel is disconnected (WAL thread crashed).
+        if self.tx.send(WalCmd::Insert(id, record)).is_err() {
+            eprintln!("WAL: channel disconnected, insert for id={} lost", id);
+        }
     }
 
-    /// Send a delete command.
+    /// Send a delete command. Blocks if channel is full (backpressure).
     pub fn send_delete(&self, id: u64) {
         self.pending_bytes.fetch_add(9, Ordering::Relaxed);
-        let _ = self.tx.try_send(WalCmd::Delete(id));
+        if self.tx.send(WalCmd::Delete(id)).is_err() {
+            eprintln!("WAL: channel disconnected, delete for id={} lost", id);
+        }
     }
 
     /// Flush: drain the channel and fsync. Blocks until done.
