@@ -4,9 +4,9 @@
 //!
 //! Two atomics, zero locks:
 //!
-//! ```
-//! next_tx_id:     AtomicU64  — ticket dispenser (fetch_add)
-//! committed_tx_id: AtomicU64  — now-serving counter (CAS)
+//! ```text
+//! next_tx_id:     AtomicU64  - ticket dispenser (fetch_add)
+//! committed_tx_id: AtomicU64  - now-serving counter (CAS)
 //! ```
 //!
 //! - **begin_write**: `fetch_add` on next_tx_id → instant ticket.

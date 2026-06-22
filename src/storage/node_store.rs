@@ -2,14 +2,14 @@
 //!
 //! ## Architecture
 //!
-//! ```
+//! ```text
 //! Business threads (N)          WAL Thread (1)
-//! ┌──────────────────┐         ┌──────────────────────┐
-//! │ DashMap::insert   │         │ recv(channel)         │
-//! │ wal.send_insert ──┼────────►│ batch serialize       │
-//! │ return immediately│         │ append to wal.log     │
-//! └──────────────────┘         │ group fsync (64KB/5ms)│
-//!                               └──────────────────────┘
+//! +------------------+         +----------------------+
+//! | DashMap::insert   |         | recv(channel)         |
+//! | wal.send_insert --+-------->| batch serialize       |
+//! | return immediately|         | append to wal.log     |
+//! +------------------+         | group fsync (64KB/5ms)|
+//!                               +----------------------+
 //! ```
 //!
 //! - Business threads never touch disk.

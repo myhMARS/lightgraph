@@ -2,17 +2,17 @@
 //!
 //! ## Architecture
 //!
-//! ```
+//! ```text
 //! Business threads (N)          WAL Thread (1)
-//! ┌──────────┐                 ┌──────────────────┐
-//! │ insert    │                 │  recv(channel)   │
-//! │ to DashMap│                 │  serialize batch │
-//! │           │                 │  append to file  │
-//! │ send(cmd) ├────────────────►│  group fsync     │
-//! └──────────┘                 └──────────────────┘
+//! +----------+                 +------------------+
+//! | insert    |                 |  recv(channel)   |
+//! | to DashMap|                 |  serialize batch |
+//! |           |                 |  append to file  |
+//! | send(cmd) +---------------->|  group fsync     |
+//! +----------+                 +------------------+
 //! ```
 //!
-//! - Business threads never touch disk — zero I/O latency.
+//! - Business threads never touch disk - zero I/O latency.
 //! - WAL thread serializes in batches for better throughput.
 //! - Data loss window: commands in channel not yet fsynced.
 //!   At most ~5ms of writes (configurable).
